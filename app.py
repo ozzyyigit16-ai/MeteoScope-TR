@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -106,7 +107,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v3")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v5")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -116,31 +117,49 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- HATASIZ VE ANINDA IP TABANLI HIZLI KONUM TESPİTİ ---
+# --- PROFESYONEL İFRAME BÖLÜCÜ GPS KÖPRÜSÜ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
-  st.info("💡 İpucu: Bulunduğunuz yerin havasını tek tıkla anında getirmek için sağdaki butonu kullanabilirsiniz.")
+  st.info("💡 İpucu: Tarayıcınızın konum iznini onaylayarak bulunduğunuz yeri tek tıkla haritaya işleyin.")
 with col_gps2:
   gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
 
 if gps_clicked:
-  try:
-    with st.spinner("IP üzerinden konumunuz tespit ediliyor..."):
-      # Harici tarayıcı GPS hatası vermeyen, güvenli IP tabanlı konum servisi
-      ip_resp = requests.get("https://ipapi.co/json/", timeout=5).json()
-      if "latitude" in ip_resp and "longitude" in ip_resp:
-        st.session_state.lat = ip_resp["latitude"]
-        st.session_state.lon = ip_resp["longitude"]
-        st.session_state.zoom = 12
-        sehir = ip_resp.get("city", "Bilinmeyen Şehir")
-        ulke = ip_resp.get("country_name", "")
-        st.session_state.son_arama = f"{sehir} / {ulke}"
-        st.success(f"Konum başarıyla bulundu: {st.session_state.son_arama}")
-        st.rerun()
-      else:
-        st.error("Konum bilgisi alınamadı. Lütfen arama çubuğunu kullanın.")
-  except Exception as e:
-    st.error(f"Konum servisine bağlanırken hata oluştu: {e}")
+  # Tarayıcı iframe kısıtlamalarını aşan modern JS köprüsü
+  gps_bridge_code = """
+    <div style="font-family:sans-serif; padding:10px; background:#eef2f7; border-radius:8px; text-align:center;">
+        <p id="gps-status" style="margin:0; font-weight:bold; color:#333;">GPS Uyduları taranıyor, lütfen tarayıcı iznini onaylayın...</p>
+    </div>
+    <script>
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const lat = position.coords.latitude;
+                const lon = position.coords.longitude;
+                document.getElementById('gps-status').innerHTML = "✅ Konum başarıyla bulundu! Yükleniyor...";
+                document.getElementById('gps-status').style.color = "green";
+                
+                // Streamlit ana döngüsüne veri aktarımı
+                const streamlitData = {lat: lat, lon: lon};
+                window.parent.postMessage({type: 'streamlit:setComponentValue', value: streamlitData}, '*');
+            },
+            (error) => {
+                let errMessage = "Konum alınamadı.";
+                if(error.code == 1) errMessage = "Konum izni reddedildi. Tarayıcı ayarlarından izin verin.";
+                else if(error.code == 2) errMessage = "Konum bilgisine ulaşılamıyor.";
+                else if(error.code == 3) errMessage = "GPS zaman aşımına uğradı.";
+                
+                document.getElementById('gps-status').innerHTML = "❌ " + errMessage;
+                document.getElementById('gps-status').style.color = "red";
+            },
+            { timeout: 15000, enableHighAccuracy: true, maximumAge: 0 }
+        );
+    } else {
+        document.getElementById('gps-status').innerHTML = "❌ Tarayıcınız GPS desteklemiyor.";
+    }
+    </script>
+    """
+  components.html(gps_bridge_code, height=60)
 
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
@@ -197,7 +216,7 @@ st.markdown("---")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-  search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Moskova, Erzurum veya İstanbul", key="main_search")
+  search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Ankara, Bursa, Paris veya Kadıköy", key="main_search")
 with col2:
   st.write("")
   st.write("")
