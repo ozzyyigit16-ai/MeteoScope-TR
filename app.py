@@ -7,7 +7,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
-import streamlit.components.v1 as components
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -107,7 +106,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v2")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v3")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -117,37 +116,31 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- HIZLI VE GÜVENLİ GPS TESPİTİ ---
+# --- HATASIZ VE ANINDA IP TABANLI HIZLI KONUM TESPİTİ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
-  st.info("💡 İpucu: Bulunduğunuz yerin anlık havasını tek tıkla görmek için sağdaki konumu al butonunu kullanabilirsiniz.")
+  st.info("💡 İpucu: Bulunduğunuz yerin havasını tek tıkla anında getirmek için sağdaki butonu kullanabilirsiniz.")
 with col_gps2:
   gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
 
 if gps_clicked:
-  # Daha kararlı ve hızlı tarayıcı konum yakalayıcısı
-  loc_js = """
-    <script>
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                const lat = position.coords.latitude;
-                const lon = position.coords.longitude;
-                // Streamlit bileşen iletişim kanalı
-                const data = {lat: lat, lon: lon};
-                window.parent.postMessage({type: 'streamlit:setComponentValue', value: data}, '*');
-            },
-            (error) => {
-                alert("GPS konum izni alınamadı veya zaman aşımına uğradı.");
-            },
-            { timeout: 10000, maximumAge: 0 }
-        );
-    } else {
-        alert("Tarayıcınız konum tespiti desteklemiyor.");
-    }
-    </script>
-    """
-  components.html(loc_js, height=0)
+  try:
+    with st.spinner("IP üzerinden konumunuz tespit ediliyor..."):
+      # Harici tarayıcı GPS hatası vermeyen, güvenli IP tabanlı konum servisi
+      ip_resp = requests.get("https://ipapi.co/json/", timeout=5).json()
+      if "latitude" in ip_resp and "longitude" in ip_resp:
+        st.session_state.lat = ip_resp["latitude"]
+        st.session_state.lon = ip_resp["longitude"]
+        st.session_state.zoom = 12
+        sehir = ip_resp.get("city", "Bilinmeyen Şehir")
+        ulke = ip_resp.get("country_name", "")
+        st.session_state.son_arama = f"{sehir} / {ulke}"
+        st.success(f"Konum başarıyla bulundu: {st.session_state.son_arama}")
+        st.rerun()
+      else:
+        st.error("Konum bilgisi alınamadı. Lütfen arama çubuğunu kullanın.")
+  except Exception as e:
+    st.error(f"Konum servisine bağlanırken hata oluştu: {e}")
 
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
