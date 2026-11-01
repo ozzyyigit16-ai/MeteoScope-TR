@@ -28,13 +28,25 @@ COUNTER_DB = "meteo_counters.db"
 ACTIVE_TIMEOUT_SECONDS = 45
 
 cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
-visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
 
-# İlk ziyarette tarayıcıya kalıcı bir kimlik verilir.
-# Cookie sayesinde sayfa yenilense veya kullanıcı daha sonra geri dönse de
-# aynı tarayıcı aynı ziyaretçi olarak tanınır.
-if not visitor_id:
-    visitor_id = str(uuid.uuid4())
+# CookieManager ilk render sırasında cookie değerini henüz okuyamamış olabilir.
+# Bu durumda her rerun'da yeni UUID üretmek yerine Streamlit oturumunda
+# geçici kimliği saklarız. Cookie yazıldıktan sonra aynı tarayıcıdaki tüm
+# sekmeler ortak meteo_visitor_id cookie'sini okur ve tek ziyaretçi sayılır.
+cookie_visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
+
+if cookie_visitor_id:
+    visitor_id = str(cookie_visitor_id)
+    st.session_state["meteo_visitor_id"] = visitor_id
+else:
+    visitor_id = st.session_state.get("meteo_visitor_id")
+    if not visitor_id:
+        visitor_id = str(uuid.uuid4())
+        st.session_state["meteo_visitor_id"] = visitor_id
+
+    # Cookie yoksa yalnızca bu oturum için üretilen sabit kimliği yaz.
+    # Cookie tarayıcı genelinde paylaşıldığından yeni sekmeler de aynı
+    # ziyaretçi kimliğini kullanır.
     cookie_manager.set(
         cookie="meteo_visitor_id",
         val=visitor_id,
@@ -73,7 +85,8 @@ def refresh_active_session(current_visitor_id):
     with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
         # Zaman aşımına uğramış oturumlar aktif listeden çıkarılır.
         conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
-        # Her heartbeat'te bu ziyaretçinin son görülme zamanı güncellenir.
+        # visitor_id tarayıcı cookie'sinden geldiği için aynı tarayıcının
+        # farklı sekmeleri aynı satırı günceller; ayrı kişi gibi çoğalmaz.
         conn.execute("""
             INSERT INTO active_sessions (visitor_id, last_seen)
             VALUES (?, ?)
@@ -116,7 +129,7 @@ def render_live_admin_metrics():
         label="Son Aranan Konum",
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
-    st.caption("Aktif oturumlar 45 saniye boyunca güncellenmezse pasif kabul edilir.")
+    st.caption("Aynı tarayıcıdaki sekmeler tek ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye boyunca sinyal göndermezse pasif kabul edilir.")
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
 def giyim_onerisi_olustur(
