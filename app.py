@@ -17,7 +17,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- KALICI VE DİNAMİK DOSYA TABANLI ZİYARETÇİ SAYACI ---
+# --- KALICI VE 0'DAN BAŞLAYAN ZİYARETÇİ SAYACI ---
 COUNTER_FILE = "visitor_count.txt"
 
 if "counted" not in st.session_state:
@@ -113,6 +113,13 @@ with st.sidebar:
   st.title("MeteoScope-TR")
   st.caption("Gelişmiş Meteoroloji & Uzman Paneli")
   st.markdown("---")
+
+  # Sayaç sıfırlama / düzeltme için küçük bir sıfırlama butonu da ekledik
+  if st.button("🔄 Sayacı Sıfırla (0 yap)", use_container_width=True):
+    if os.path.exists(COUNTER_FILE):
+      os.remove(COUNTER_FILE)
+    st.session_state.clear()
+    st.rerun()
 
   st.subheader("🔐 Gizli Yönetici Girişi")
   yonetici_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_pass")
