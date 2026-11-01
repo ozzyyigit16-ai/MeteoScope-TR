@@ -259,6 +259,7 @@ if st.session_state.lat and st.session_state.lon:
   st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
   with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz yapılıyor..."):
+    # Profesyonel çoklu model ve parametre seti kararlı hale getirildi
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
@@ -275,8 +276,8 @@ if st.session_state.lat and st.session_state.lon:
     )
 
     try:
-      f_response = requests.get(forecast_url, timeout=10)
-      a_response = requests.get(archive_url, timeout=10)
+      f_response = requests.get(forecast_url, timeout=15)
+      a_response = requests.get(archive_url, timeout=15)
     except Exception as e:
       f_response = None
       a_response = None
@@ -314,7 +315,7 @@ if st.session_state.lat and st.session_state.lon:
         else:
           st.success(mesaj)
 
-      # --- YENİ ÖZELLİK: 3 GÜNÜ ORTALAMA DEĞİL, GÜN GÜN (TARİH TARİH) GÖSTERME ---
+      # --- 3 GÜNLÜK GÜN GÜN (TARİH TARİH) TAHMİN KUTULARI ---
       st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
       if not df_3days.empty:
         df_3days["date"] = df_3days["time"].dt.date
@@ -482,4 +483,4 @@ if st.session_state.lat and st.session_state.lon:
         st.dataframe(df, use_container_width=True)
 
     else:
-      st.error(f"Veri çekilirken bir hata oluştu. HTTP Kodu: {f_response.status_code if f_response else 'Yanıt Yok'}")
+      st.error(f"Veriler API sunucusundan alınamadı. HTTP Durum Kodu: {f_response.status_code if f_response else 'Yanıt Yok'}")
