@@ -8,6 +8,7 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 import time
+import os
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -16,11 +17,40 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- DİNAMİK ZİYARETÇİ VE OTURUM SAYACI ---
-if "toplam_ziyaret" not in st.session_state:
-  st.session_state.toplam_ziyaret = 1268
+# --- KALICI VE DİNAMİK DOSYA TABANLI ZİYARETÇİ SAYACI ---
+COUNTER_FILE = "visitor_count.txt"
+
+if "counted" not in st.session_state:
+  current_count = 0
+  if os.path.exists(COUNTER_FILE):
+    try:
+      with open(COUNTER_FILE, "r") as f:
+        content = f.read().strip()
+        current_count = int(content) if content else 0
+    except Exception:
+      current_count = 0
+
+  current_count += 1
+  try:
+    with open(COUNTER_FILE, "w") as f:
+      f.write(str(current_count))
+  except Exception:
+    pass
+
+  st.session_state.toplam_ziyaret = current_count
+  st.session_state.counted = True
+else:
+  if os.path.exists(COUNTER_FILE):
+    try:
+      with open(COUNTER_FILE, "r") as f:
+        st.session_state.toplam_ziyaret = int(f.read().strip())
+    except Exception:
+      st.session_state.toplam_ziyaret = 1
+  else:
+    st.session_state.toplam_ziyaret = 1
+
+if "aktif_oturumlar" not in st.session_state:
   st.session_state.aktif_oturumlar = 1
-  st.session_state.toplam_ziyaret += 1
 
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
@@ -260,10 +290,6 @@ if st.session_state.lat and st.session_state.lon:
   st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
   with st.spinner("Model verileri ve akıllı kademeli analiz yükleniyor..."):
-    # --- AKILLI KADEMELİ MODEL URL LİSTESİ (FALLBACK SİSTEMİ) ---
-    # 1. Önce 3'lü model kombinasyonunu dener (ECMWF, GFS, ICON)
-    # 2. Yoğunluktan patlarsa 2'li modele düşer (ECMWF, GFS)
-    # 3. Hala yanıt alamazsa en kararlı tekil model / seamless yapıya geçer
     forecast_urls_to_try = [
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7",
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless&forecast_days=7",
@@ -278,7 +304,6 @@ if st.session_state.lat and st.session_state.lon:
     )
 
     f_response = None
-    # Kademeli olarak modelleri dener, biri bile 200 dönerse hemen yakalar
     for url in forecast_urls_to_try:
       for attempt in range(2):
         try:
@@ -292,7 +317,6 @@ if st.session_state.lat and st.session_state.lon:
       if f_response and f_response.status_code == 200:
         break
 
-    # Arşiv isteği için de güvenli deneme
     a_response = None
     for attempt in range(2):
       try:
@@ -402,7 +426,6 @@ if st.session_state.lat and st.session_state.lon:
         if model_temp_cols:
           st.line_chart(df.set_index("time")[model_temp_cols])
         else:
-          # Eğer tek model düşerse genel sıcaklık grafiğini basar
           st.line_chart(df.set_index("time")[["temperature_2m"]])
 
         st.write("**2. Rüzgar Hızı Modelleri Karşılaştırması (km/s):**")
