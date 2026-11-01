@@ -16,10 +16,14 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- DİNAMİK ZİYARETÇİ VE OTURUM SAYACI ---
+# --- DİNAMİK VE YORMAYAN ZİYARETÇİ SAYACI ---
 if "toplam_ziyaret" not in st.session_state:
-  st.session_state.toplam_ziyaret = 1268
+  st.session_state.toplam_ziyaret = 0
   st.session_state.aktif_oturumlar = 1
+
+# Aynı oturumda sayfanın yenilenmesiyle sayacın durmaksızın artmasını önleyen akıllı bayrak
+if "ziyaret_sayildi" not in st.session_state:
+  st.session_state.ziyaret_sayildi = True
   st.session_state.toplam_ziyaret += 1
 
 
@@ -90,7 +94,7 @@ with st.sidebar:
   if yonetici_sifre == "meteo2026":
     st.success("✅ Yönetici Modu Aktif")
     st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
-    st.metric(label="Toplam Uygulama Ziyareti", value=f"{st.session_state.toplam_ziyaret:,}")
+    st.metric(label="Toplam Ziyaretçi Sayısı", value=f"{st.session_state.toplam_ziyaret:,}")
     st.metric(label="Anlık Aktif Oturum", value=st.session_state.aktif_oturumlar)
     st.metric(label="Son Aranan Konum", value=st.session_state.get("son_arama", "İstanbul / Merkez"))
     st.info("Bu dinamik veriler sadece senin yönetici panelinde görünür.")
@@ -153,8 +157,8 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
       loc_b = geolocator.geocode(baslangic_yer)
       loc_v = geolocator.geocode(bitis_yer)
       if loc_b and loc_v:
-        url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}&current=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}&current=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+        url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+        url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
         
         res_b = requests.get(url_b).json().get("current", {})
         res_v = requests.get(url_v).json().get("current", {})
@@ -291,7 +295,7 @@ if st.session_state.lat and st.session_state.lon:
 
   with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz yapılıyor..."):
     forecast_url = (
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}&current="
+        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
         "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
@@ -340,12 +344,11 @@ if st.session_state.lat and st.session_state.lon:
         else:
           st.success(mesaj)
 
-      # --- YENİ ÖZELLİK: 3 GÜNÜ ORTALAMA DEĞİL, GÜN GÜN (TARİH TARİH) GÖSTERME ---
+      # --- GÜNLÜK KIRILIMLI 3 GÜNLÜK TAHMİN KUTULARI ---
       st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
       if not df_3days.empty:
-        # Tarih sütunu ekle
         df_3days["date"] = df_3days["time"].dt.date
-        unique_dates = df_3days["date"].unique()[:3] # İlk 3 gün
+        unique_dates = df_3days["date"].unique()[:3]
 
         cols_day = st.columns(len(unique_dates) if len(unique_dates) > 0 else 1)
         
@@ -358,7 +361,6 @@ if st.session_state.lat and st.session_state.lon:
           d_snow = day_df["snowfall"].sum() if "snowfall" in day_df.columns else 0
           d_wind = day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else 0
 
-          # Gün adını Türkçe bulma
           gun_ismi = pd.to_datetime(d).strftime('%A')
           gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
 
@@ -434,7 +436,6 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab3:
         st.subheader("📄 Otomatik Meteorolojik Durum Raporu")
-        # Rapor için genel ortalama değerler
         t_all = [c for c in df_3days.columns if "temperature_2m" in c]
         rep_min = df_3days[t_all].min().min() if t_all else 0
         rep_max = df_3days[t_all].max().max() if t_all else 0
