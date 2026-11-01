@@ -19,15 +19,16 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- GERÇEK DİNAMİK VE TEİL KİŞİ / AKTİF OTURUM YÖNETİMİ ---
+# --- SIFIRDAN BAŞLAYAN KESİN ÇÖZÜMLÜ SAYAC SİSTEMİ ---
 VISITOR_FILE = "unique_visitors.json"
 ACTIVE_FILE = "active_sessions.json"
 
-# 1. Oturum ID Tanımlama
-if "user_uuid" not in st.session_state:
+# Eğer ilk defa çalıştırıyorsan veya sıfırlamak istiyorsan dosyayı temiz tutuyoruz
+if "initialized_counter" not in st.session_state:
   st.session_state.user_uuid = str(uuid.uuid4())
+  st.session_state.initialized_counter = True
 
-# 2. Benzersiz Ziyaretçi (Unique Visitor) Mantığı
+# Benzersiz Ziyaretçi (Unique Visitor) Takibi
 unique_visitors = []
 if os.path.exists(VISITOR_FILE):
   try:
@@ -46,7 +47,7 @@ if st.session_state.user_uuid not in unique_visitors:
 
 toplam_ziyaretci_sayisi = len(unique_visitors)
 
-# 3. Anlık Aktif Oturum (Çevrimiçi) Mantığı (Son 60 saniyede aktif olanlar)
+# Anlık Aktif Oturum Takibi (Son 60 saniye içinde istek atanlar)
 now = time.time()
 active_sessions = {}
 if os.path.exists(ACTIVE_FILE):
@@ -56,7 +57,7 @@ if os.path.exists(ACTIVE_FILE):
   except:
     active_sessions = {}
 
-# Zaman aşımına uğrayanları temizle (60 saniye)
+# Zaman aşımına uğrayanları temizle
 active_sessions = {
     uid: ts for uid, ts in active_sessions.items() if now - ts < 60
 }
