@@ -107,7 +107,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Mahalle veya ilçe düzeyinde hassas arama yapabilir, haritadan nokta seçebilir ya da **Yüksek Hassasiyetli GPS** kullanabilirsiniz.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v7")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v8")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -117,7 +117,7 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- MAHALLE / SOKAK DÜZEYİNDE YÜKSEK HASSASİYETLİ GPS MODülü ---
+# --- MAHALLE / SOKAK DÜZEYİNDE YÜKSEK HASSASİYETLİ GPS MODÜLÜ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
   st.info("🎯 **Hassas Konum:** Tarayıcınızın GPS çipi üzerinden mahalle ve sokak düzeyinde tam koordinat almak için butonu kullanın.")
@@ -125,7 +125,6 @@ with col_gps2:
   gps_clicked = st.button("📍 Nokta Atışı Konum", use_container_width=True)
 
 if gps_clicked:
-  # En yüksek hassasiyet modunu (enableHighAccuracy: true) zorlayan JS betiği
   precise_gps_js = """
     <div style="font-family:sans-serif; padding:10px; background:#e0f2fe; border-radius:8px; text-align:center; border: 1px solid #bae6fd;">
         <p id="gps-status" style="margin:0; font-weight:bold; color:#0369a1;">📡 Yüksek hassasiyetli uydu ve Wi-Fi triangülasyonu yapılıyor...</p>
@@ -230,7 +229,7 @@ if search_button and search_query:
       if location:
         st.session_state.lat = location.latitude
         st.session_state.lon = location.longitude
-        st.session_state.zoom = 14  # Mahalle düzeyini net görmek için zoom artırıldı
+        st.session_state.zoom = 14
         st.session_state.son_arama = search_query
         st.success(f"Nokta Atışı Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
         st.rerun()
@@ -408,7 +407,7 @@ if st.session_state.lat and st.session_state.lon:
         with curr_col4:
           st.metric(label="Rüzgar Hızı / Hamle", value=f"{current_wind:.1f} / {current_gust:.1f} km/s")
         with curr_col5:
-          st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} ({wind_deg}°)")
+          st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} (°{wind_deg})")
 
       st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
 
@@ -519,7 +518,7 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab7:
         st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
-        rain_snow_cols = [col for col in df.codes if "precipitation" in col or "snow" in col] if hasattr(df, 'codes') else [col for col in df.columns if "precipitation" in col or "snow" in col]
+        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
         if rain_snow_cols:
           st.line_chart(df.set_index("time")[rain_snow_cols])
 
