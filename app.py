@@ -7,7 +7,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
-import streamlit.components.v1 as components
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -105,9 +104,9 @@ with st.sidebar:
 
 # --- ANA UYGULAMA ---
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
-st.markdown("Mahalle veya ilçe düzeyinde hassas arama yapabilir, haritadan nokta seçebilir ya da **Yüksek Hassasiyetli GPS** kullanabilirsiniz.")
+st.markdown("Arama çubuğunu kullanabilir, harita üzerinden nokta seçebilir veya **Güzergah Analizi** yapabilirsiniz.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v9")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v11")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -117,59 +116,14 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- MAHALLE / SOKAK DÜZEYİNDE YÜKSEK HASSASİYETLİ GPS MODÜLÜ ---
-col_gps1, col_gps2 = st.columns([4, 1])
-with col_gps1:
-  st.info("🎯 **Hassas Konum:** Tarayıcınızın GPS çipi üzerinden mahalle ve sokak düzeyinde tam koordinat almak için butonu kullanın[cite: 1].")
-with col_gps2:
-  gps_clicked = st.button("📍 Nokta Atışı Konum", use_container_width=True)
-
-if gps_clicked:
-  precise_gps_js = """
-    <div style="font-family:sans-serif; padding:10px; background:#e0f2fe; border-radius:8px; text-align:center; border: 1px solid #bae6fd;">
-        <p id="gps-status" style="margin:0; font-weight:bold; color:#0369a1;">📡 Yüksek hassasiyetli uydu ve Wi-Fi triangülasyonu yapılıyor...</p>
-    </div>
-    <script>
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                const lat = position.coords.latitude;
-                const lon = position.coords.longitude;
-                const accuracy = position.coords.accuracy;
-                
-                document.getElementById('gps-status').innerHTML = "✅ Hassas konum alındı (Hata payı: ~" + Math.round(accuracy) + "m). Harita güncelleniyor...";
-                document.getElementById('gps-status').style.color = "#15803d";
-                
-                const streamlitData = {lat: lat, lon: lon};
-                window.parent.postMessage({type: 'streamlit:setComponentValue', value: streamlitData}, '*');
-            },
-            (error) => {
-                let errMessage = "Konum alınamadı.";
-                if(error.code == 1) errMessage = "Tarayıcı konum izni reddedildi.";
-                else if(error.code == 2) errMessage = "Konum sinyali alınamıyor.";
-                else if(error.code == 3) errMessage = "GPS zaman aşımına uğradı.";
-                
-                document.getElementById('gps-status').innerHTML = "❌ " + errMessage;
-                document.getElementById('gps-status').style.color = "#b91c1c";
-            },
-            { timeout: 20000, enableHighAccuracy: true, maximumAge: 0 }
-        );
-    } else {
-        document.getElementById('gps-status').innerHTML = "❌ Tarayıcınız hassas konumu desteklemiyor.";
-    }
-    </script>
-    """
-  components.html(precise_gps_js, height=65)
-
-
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
 with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded=False):
-  st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün[cite: 1].")
+  st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün.")
   col_g1, col_g2, col_g3 = st.columns([2, 2, 1])
   with col_g1:
-    baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: Maslak, İstanbul", key="bas_yer")
+    baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: İstanbul", key="bas_yer")
   with col_g2:
-    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Nilüfer, Bursa", key="bit_yer")
+    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Bursa", key="bit_yer")
   with col_g3:
     st.write("")
     st.write("")
@@ -216,7 +170,7 @@ st.markdown("---")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-  search_query = st.text_input("🔍 Mahalle / İlçe / Şehir Ara", placeholder="Örn: Ayazağa Mah. İstanbul, Nilüfer Bursa veya Kadıköy", key="main_search")
+  search_query = st.text_input("🔍 Konum Ara (Şehir, İlçe)", placeholder="Örn: İstanbul, Ankara veya Bursa", key="main_search")
 with col2:
   st.write("")
   st.write("")
@@ -224,21 +178,21 @@ with col2:
 
 if search_button and search_query:
   try:
-    with st.spinner("Hassas konum aranıyor..."):
+    with st.spinner("Konum aranıyor..."):
       location = geolocator.geocode(search_query, timeout=5)
       if location:
         st.session_state.lat = location.latitude
         st.session_state.lon = location.longitude
-        st.session_state.zoom = 14
+        st.session_state.zoom = 12
         st.session_state.son_arama = search_query
-        st.success(f"Nokta Atışı Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
+        st.success(f"Bulunan Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
         st.rerun()
       else:
-        st.error("Aradığınız mahalle/ilçe bulunamadı. Lütfen 'Mahalle adı, İlçe/Şehir' şeklinde yazın.")
+        st.error("Aradığınız konum bulunamadı.")
   except Exception as e:
-    st.error(f"Arama sunucusuna bağlanırken hata oluştu: {e}")
+    st.error(f"Arama hatası: {e}")
 
-# --- HARİTA VE TEMİZ KATMANLAR ---
+# --- HARİTA ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
@@ -268,15 +222,15 @@ Draw(
 
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
-    popup="Seçilen Hassas Konum",
-    tooltip="Aktif Nokta",
+    popup="Seçilen Konum",
+    tooltip="Aktif Konum",
     icon=folium.Icon(color="red", icon="cloud"),
 ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
-st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Çizim Aracı")
-st.info("Harita üzerinden dilediğiniz binaya, sokağa veya mahalleye tıklayarak o noktaya ait verileri anında çekebilirsiniz[cite: 1].")
+st.subheader("📍 İnteraktif Harita ve Veri Paneli")
+st.info("Harita üzerinde dilediğiniz yere tıklayarak o noktanın verilerini anında görüntüleyebilirsiniz.")
 
 map_data = st_folium(m, width="100%", height=480)
 
@@ -307,15 +261,14 @@ def degrees_to_cardinal(deg):
 
 if st.session_state.lat and st.session_state.lon:
   st.markdown("---")
-  st.success(f"Aktif Hassas Koordinat -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
+  st.success(f"Aktif Koordinat -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
-  with st.spinner("Nokta atışı 3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz çekiliyor..."):
-    # Hatasız, en kararlı Open-Meteo API URL yapılandırması
+  with st.spinner("Hava durumu verileri yükleniyor..."):
+    # En sade, en temiz ve asla patlamayan Open-Meteo API çağrısı
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
-        "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
-        "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
+        "temperature_2m,relative_humidity_2m,precipitation,snowfall,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
         "&forecast_days=7"
     )
 
@@ -327,13 +280,14 @@ if st.session_state.lat and st.session_state.lon:
     )
 
     try:
-      f_response = requests.get(forecast_url, timeout=12)
-      a_response = requests.get(archive_url, timeout=12)
+      f_response = requests.get(forecast_url, timeout=10)
+      a_response = requests.get(archive_url, timeout=10)
     except Exception as e:
       f_response = None
       a_response = None
-      st.error(f"Open-Meteo API sunucusuna bağlanırken ağ hatası oluştu: {e}")
+      st.error(f"Bağlantı hatası oluştu: {e}")
 
+    # Eğer istek başarılıysa verileri işle
     if f_response and f_response.status_code == 200:
       f_data = f_response.json()
       hourly_data = f_data.get("hourly", {})
@@ -355,7 +309,7 @@ if st.session_state.lat and st.session_state.lon:
 
       df_3days = df.head(72)
 
-      # --- GÜNÜN RİSK ÖZETİ BANNERI ---
+      # --- RİSK ÖZETİ ---
       st.markdown("### 🚨 Günün Meteorolojik Risk Özeti ve Canlı Uyarılar")
       uyarilar = konum_uyari_analizi(current_data, df_3days)
       for seviye, mesaj in uyarilar:
@@ -366,7 +320,7 @@ if st.session_state.lat and st.session_state.lon:
         else:
           st.success(mesaj)
 
-      # --- GÜNLÜK KIRILIMLI 3 GÜNLÜK TAHMİN KUTULARI ---
+      # --- 3 GÜNLÜK TAHMİN KUTULARI ---
       st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
       if not df_3days.empty:
         df_3days["date"] = df_3days["time"].dt.date
@@ -393,6 +347,7 @@ if st.session_state.lat and st.session_state.lon:
               st.metric(label="Toplam Yağış / Kar", value=f"{d_precip:.1f} mm / {d_snow:.1f} cm")
               st.metric(label="Max Rüzgar Hamlesi", value=f"{d_wind:.1f} km/s")
 
+      # --- ANLIK DURUM ---
       if current_data:
         st.markdown("### ⚡ Anlık Meteorolojik Durum")
         wind_deg = current_data.get("wind_direction_10m", 0)
@@ -410,10 +365,11 @@ if st.session_state.lat and st.session_state.lon:
         with curr_col5:
           st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} ({wind_deg}°)")
 
+      # --- SEKMELER ---
       st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
 
       tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-          "🤝 3'lü Model Konsensüsü (Gelişmiş)",
+          "🤝 Model Trendleri",
           "🕰️ Geçmiş Arşiv",
           "📄 Otomatik Uzman Raporu",
           "🌡️ Sıcaklık & Nem",
@@ -424,15 +380,11 @@ if st.session_state.lat and st.session_state.lon:
       ])
 
       with tab1:
-        st.subheader("🌐 Küresel Modeller Arası Karşılaştırma ve Konsensüs Analizi")
-        st.markdown("Aşağıdaki grafiklerde **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
-
+        st.subheader("🌐 Seçilen Lokasyon için Hava Trendleri")
         st.write("**1. Sıcaklık Trendi (°C):**")
         st.line_chart(df.set_index("time")[["temperature_2m"]])
-
         st.write("**2. Rüzgar Hızı Trendi (km/s):**")
         st.line_chart(df.set_index("time")[["wind_speed_10m"]])
-
         st.write("**3. Yağış Trendi (mm):**")
         st.line_chart(df.set_index("time")[["precipitation"]])
 
@@ -469,8 +421,8 @@ if st.session_state.lat and st.session_state.lon:
         - Kar Yağışı (Anlık): {current_snow:.1f} cm
         - Rüzgar Hızı / Hamle: {current_wind:.1f} / {current_gust:.1f} km/s
         
-        2. 3 GÜNLÜK GÜN GÜN (BÖLÜNMÜŞ) TAHMİN TRENDİ:
-        - Önümüzdeki 3 günlük periyotta sıcaklık {rep_min:.1f}°C ile {rep_max:.1f}°C arasında seyredecek olup, veriler günlük bazda (tarih kırılımlı) izlenmektedir.
+        2. 3 GÜNLÜK GÜN GÜN TAHMİN TRENDİ:
+        - Önümüzdeki 3 günlük periyotta sıcaklık {rep_min:.1f}°C ile {rep_max:.1f}°C arasında seyredecektir.
         - Toplam Yağış / Kar Beklentisi: {rep_precip:.1f} mm / {rep_snow:.1f} cm
         
         3. AKILLI GİYİM TAVSİYESİ:
@@ -507,7 +459,7 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab7:
         st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
-        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col or "probability" in col]
+        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
         if rain_snow_cols:
           st.line_chart(df.set_index("time")[rain_snow_cols])
 
@@ -522,4 +474,6 @@ if st.session_state.lat and st.session_state.lon:
         st.dataframe(df, use_container_width=True)
 
     else:
-      st.error("Veriler API sunucusundan alınamadı. Lütfen internet bağlantınızı kontrol edin veya farklı bir konum aratın.")
+      # Hatanın sebebini açıkça görmek için detay ekledik
+      status_code = f_response.status_code if f_response else "Bağlantı Yok"
+      st.error(f"Veriler API sunucusundan alınamadı. (HTTP Durum Kodu: {status_code}) Lütfen arama çubuğunu kullanın.")
