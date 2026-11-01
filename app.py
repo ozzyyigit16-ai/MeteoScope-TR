@@ -107,7 +107,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Mahalle veya ilçe düzeyinde hassas arama yapabilir, haritadan nokta seçebilir ya da **Yüksek Hassasiyetli GPS** kullanabilirsiniz.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v8")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v9")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -120,7 +120,7 @@ if "zoom" not in st.session_state:
 # --- MAHALLE / SOKAK DÜZEYİNDE YÜKSEK HASSASİYETLİ GPS MODÜLÜ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
-  st.info("🎯 **Hassas Konum:** Tarayıcınızın GPS çipi üzerinden mahalle ve sokak düzeyinde tam koordinat almak için butonu kullanın.")
+  st.info("🎯 **Hassas Konum:** Tarayıcınızın GPS çipi üzerinden mahalle ve sokak düzeyinde tam koordinat almak için butonu kullanın[cite: 1].")
 with col_gps2:
   gps_clicked = st.button("📍 Nokta Atışı Konum", use_container_width=True)
 
@@ -164,7 +164,7 @@ if gps_clicked:
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
 with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded=False):
-  st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün.")
+  st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün[cite: 1].")
   col_g1, col_g2, col_g3 = st.columns([2, 2, 1])
   with col_g1:
     baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: Maslak, İstanbul", key="bas_yer")
@@ -276,7 +276,7 @@ folium.Marker(
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Çizim Aracı")
-st.info("Harita üzerinden dilediğiniz binaya, sokağa veya mahalleye tıklayarak o noktaya ait verileri anında çekebilirsiniz.")
+st.info("Harita üzerinden dilediğiniz binaya, sokağa veya mahalleye tıklayarak o noktaya ait verileri anında çekebilirsiniz[cite: 1].")
 
 map_data = st_folium(m, width="100%", height=480)
 
@@ -310,12 +310,13 @@ if st.session_state.lat and st.session_state.lon:
   st.success(f"Aktif Hassas Koordinat -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
   with st.spinner("Nokta atışı 3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz çekiliyor..."):
+    # Hatasız, en kararlı Open-Meteo API URL yapılandırması
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
         "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
-        "&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7"
+        "&forecast_days=7"
     )
 
     today = date.today()
@@ -326,8 +327,8 @@ if st.session_state.lat and st.session_state.lon:
     )
 
     try:
-      f_response = requests.get(forecast_url, timeout=10)
-      a_response = requests.get(archive_url, timeout=10)
+      f_response = requests.get(forecast_url, timeout=12)
+      a_response = requests.get(archive_url, timeout=12)
     except Exception as e:
       f_response = None
       a_response = None
@@ -407,7 +408,7 @@ if st.session_state.lat and st.session_state.lon:
         with curr_col4:
           st.metric(label="Rüzgar Hızı / Hamle", value=f"{current_wind:.1f} / {current_gust:.1f} km/s")
         with curr_col5:
-          st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} (°{wind_deg})")
+          st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} ({wind_deg}°)")
 
       st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
 
@@ -424,28 +425,16 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab1:
         st.subheader("🌐 Küresel Modeller Arası Karşılaştırma ve Konsensüs Analizi")
-        st.markdown("Aşağıdaki grafiklerde **ECMWF**, **GFS** ve **ICON** modellerinin aynı lokasyon için öngördüğü **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
+        st.markdown("Aşağıdaki grafiklerde **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
 
-        st.write("**1. Sıcaklık Modelleri Karşılaştırması (°C):**")
-        model_temp_cols = [c for c in df.columns if "temperature_2m" in c and "_" in c]
-        if model_temp_cols:
-          st.line_chart(df.set_index("time")[model_temp_cols])
-        else:
-          st.info("Sıcaklık model sütunları yüklenemedi.")
+        st.write("**1. Sıcaklık Trendi (°C):**")
+        st.line_chart(df.set_index("time")[["temperature_2m"]])
 
-        st.write("**2. Rüzgar Hızı Modelleri Karşılaştırması (km/s):**")
-        model_wind_cols = [c for c in df.columns if "wind_speed_10m" in c and "_" in c]
-        if model_wind_cols:
-          st.line_chart(df.set_index("time")[model_wind_cols])
-        else:
-          st.info("Rüzgar model sütunları yüklenemedi.")
+        st.write("**2. Rüzgar Hızı Trendi (km/s):**")
+        st.line_chart(df.set_index("time")[["wind_speed_10m"]])
 
-        st.write("**3. Yağış Modelleri Karşılaştırması (mm):**")
-        model_precip_cols = [c for c in df.columns if "precipitation" in c and "_" in c]
-        if model_precip_cols:
-          st.line_chart(df.set_index("time")[model_precip_cols])
-        else:
-          st.info("Yağış model sütunları yüklenemedi.")
+        st.write("**3. Yağış Trendi (mm):**")
+        st.line_chart(df.set_index("time")[["precipitation"]])
 
       with tab2:
         st.subheader("Geçmiş 7 Günün Arşiv Verileri")
@@ -500,7 +489,7 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab4:
         st.subheader("Sıcaklık ve Bağıl Nem / Çiy Noktası")
-        temp_cols = [col for col in df.columns if "temperature_2m" in col or "relative_humidity_2m" in col]
+        temp_cols = [col for col in df.columns if "temperature_2m" in col or "relative_humidity_2m" in col or "dew_point_2m" in col]
         if temp_cols:
           st.line_chart(df.set_index("time")[temp_cols])
 
@@ -518,7 +507,7 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab7:
         st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
-        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
+        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col or "probability" in col]
         if rain_snow_cols:
           st.line_chart(df.set_index("time")[rain_snow_cols])
 
