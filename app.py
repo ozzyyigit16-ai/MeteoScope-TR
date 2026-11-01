@@ -9,6 +9,8 @@ import streamlit as st
 from streamlit_folium import st_folium
 import time
 import os
+import json
+import uuid
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -17,40 +19,56 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- KALICI VE 0'DAN BAŞLAYAN ZİYARETÇİ SAYACI ---
-COUNTER_FILE = "visitor_count.txt"
+# --- GERÇEK DİNAMİK VE TEİL KİŞİ / AKTİF OTURUM YÖNETİMİ ---
+VISITOR_FILE = "unique_visitors.json"
+ACTIVE_FILE = "active_sessions.json"
 
-if "counted" not in st.session_state:
-  current_count = 0
-  if os.path.exists(COUNTER_FILE):
-    try:
-      with open(COUNTER_FILE, "r") as f:
-        content = f.read().strip()
-        current_count = int(content) if content else 0
-    except Exception:
-      current_count = 0
+# 1. Oturum ID Tanımlama
+if "user_uuid" not in st.session_state:
+  st.session_state.user_uuid = str(uuid.uuid4())
 
-  current_count += 1
+# 2. Benzersiz Ziyaretçi (Unique Visitor) Mantığı
+unique_visitors = []
+if os.path.exists(VISITOR_FILE):
   try:
-    with open(COUNTER_FILE, "w") as f:
-      f.write(str(current_count))
-  except Exception:
+    with open(VISITOR_FILE, "r") as f:
+      unique_visitors = json.load(f)
+  except:
+    unique_visitors = []
+
+if st.session_state.user_uuid not in unique_visitors:
+  unique_visitors.append(st.session_state.user_uuid)
+  try:
+    with open(VISITOR_FILE, "w") as f:
+      json.dump(unique_visitors, f)
+  except:
     pass
 
-  st.session_state.toplam_ziyaret = current_count
-  st.session_state.counted = True
-else:
-  if os.path.exists(COUNTER_FILE):
-    try:
-      with open(COUNTER_FILE, "r") as f:
-        st.session_state.toplam_ziyaret = int(f.read().strip())
-    except Exception:
-      st.session_state.toplam_ziyaret = 1
-  else:
-    st.session_state.toplam_ziyaret = 1
+toplam_ziyaretci_sayisi = len(unique_visitors)
 
-if "aktif_oturumlar" not in st.session_state:
-  st.session_state.aktif_oturumlar = 1
+# 3. Anlık Aktif Oturum (Çevrimiçi) Mantığı (Son 60 saniyede aktif olanlar)
+now = time.time()
+active_sessions = {}
+if os.path.exists(ACTIVE_FILE):
+  try:
+    with open(ACTIVE_FILE, "r") as f:
+      active_sessions = json.load(f)
+  except:
+    active_sessions = {}
+
+# Zaman aşımına uğrayanları temizle (60 saniye)
+active_sessions = {
+    uid: ts for uid, ts in active_sessions.items() if now - ts < 60
+}
+active_sessions[st.session_state.user_uuid] = now
+
+try:
+  with open(ACTIVE_FILE, "w") as f:
+    json.dump(active_sessions, f)
+except:
+  pass
+
+anlik_aktif_oturum = len(active_sessions)
 
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
@@ -114,21 +132,14 @@ with st.sidebar:
   st.caption("Gelişmiş Meteoroloji & Uzman Paneli")
   st.markdown("---")
 
-  # Sayaç sıfırlama / düzeltme için küçük bir sıfırlama butonu da ekledik
-  if st.button("🔄 Sayacı Sıfırla (0 yap)", use_container_width=True):
-    if os.path.exists(COUNTER_FILE):
-      os.remove(COUNTER_FILE)
-    st.session_state.clear()
-    st.rerun()
-
   st.subheader("🔐 Gizli Yönetici Girişi")
   yonetici_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_pass")
 
   if yonetici_sifre == "meteo2026":
     st.success("✅ Yönetici Modu Aktif")
     st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
-    st.metric(label="Toplam Uygulama Ziyareti", value=f"{st.session_state.toplam_ziyaret:,}")
-    st.metric(label="Anlık Aktif Oturum", value=st.session_state.aktif_oturumlar)
+    st.metric(label="Toplam Uygulama Ziyareti", value=f"{toplam_ziyaretci_sayisi:,}")
+    st.metric(label="Anlık Aktif Oturum", value=anlik_aktif_oturum)
     st.metric(label="Son Aranan Konum", value=st.session_state.get("son_arama", "İstanbul / Merkez"))
     st.info("Bu dinamik veriler sadece senin yönetici panelinde görünür.")
   elif yonetici_sifre != "":
