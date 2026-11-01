@@ -107,7 +107,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v5")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v6")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -117,7 +117,7 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- PROFESYONEL İFRAME BÖLÜCÜ GPS KÖPRÜSÜ ---
+# --- GPS KÖPRÜSÜ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
   st.info("💡 İpucu: Tarayıcınızın konum iznini onaylayarak bulunduğunuz yeri tek tıkla haritaya işleyin.")
@@ -125,7 +125,6 @@ with col_gps2:
   gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
 
 if gps_clicked:
-  # Tarayıcı iframe kısıtlamalarını aşan modern JS köprüsü
   gps_bridge_code = """
     <div style="font-family:sans-serif; padding:10px; background:#eef2f7; border-radius:8px; text-align:center;">
         <p id="gps-status" style="margin:0; font-weight:bold; color:#333;">GPS Uyduları taranıyor, lütfen tarayıcı iznini onaylayın...</p>
@@ -138,17 +137,14 @@ if gps_clicked:
                 const lon = position.coords.longitude;
                 document.getElementById('gps-status').innerHTML = "✅ Konum başarıyla bulundu! Yükleniyor...";
                 document.getElementById('gps-status').style.color = "green";
-                
-                // Streamlit ana döngüsüne veri aktarımı
                 const streamlitData = {lat: lat, lon: lon};
                 window.parent.postMessage({type: 'streamlit:setComponentValue', value: streamlitData}, '*');
             },
             (error) => {
                 let errMessage = "Konum alınamadı.";
-                if(error.code == 1) errMessage = "Konum izni reddedildi. Tarayıcı ayarlarından izin verin.";
+                if(error.code == 1) errMessage = "Konum izni reddedildi.";
                 else if(error.code == 2) errMessage = "Konum bilgisine ulaşılamıyor.";
                 else if(error.code == 3) errMessage = "GPS zaman aşımına uğradı.";
-                
                 document.getElementById('gps-status').innerHTML = "❌ " + errMessage;
                 document.getElementById('gps-status').style.color = "red";
             },
@@ -238,13 +234,14 @@ if search_button and search_query:
   except Exception as e:
     st.error(f"Arama sunucusuna bağlanırken hata oluştu: {e}")
 
-# --- HARİTA VE KATMANLAR ---
+# --- HARİTA VE TEMİZ KATMANLAR (HATALI DARK_LAYER KALDIRILDI) ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
     tiles="OpenStreetMap",
 )
 
+# Sadece sorunsuz çalışan Canlı Yağış Radarı bırakıldı
 radar_layer = TileLayer(
     tiles="https://tile.rainviewer.com/v2/radar/nowcast_120/{z}/{x}/{y}/2/1_1.png",
     attr="RainViewer",
@@ -253,15 +250,6 @@ radar_layer = TileLayer(
     opacity=0.6,
 )
 radar_layer.add_to(m)
-
-dark_layer = TileLayer(
-    tiles="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    attr="CartoDB Dark",
-    name="Karanlık Mod Harita",
-    overlay=True,
-    opacity=0.8,
-)
-dark_layer.add_to(m)
 
 Draw(
     export=False,
