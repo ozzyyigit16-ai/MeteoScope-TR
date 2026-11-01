@@ -1,6 +1,7 @@
 streamlit
-geopy
-folium
 streamlit-folium
+folium
+geopy
 pandas
 requests
+extra-streamlit-components
