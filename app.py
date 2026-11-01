@@ -359,6 +359,149 @@ if "lon" not in st.session_state:
   st.session_state.lon = 28.9784
 if "zoom" not in st.session_state:
   st.session_state.zoom = 10
+if "location_label" not in st.session_state:
+  st.session_state.location_label = "İstanbul / Merkez"
+
+
+# --- KONUM VE MODEL BAZLI OPEN-METEO VERİ MOTORU ---
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+CURRENT_VARIABLES = [
+    "temperature_2m", "relative_humidity_2m", "apparent_temperature",
+    "precipitation", "snowfall", "weather_code", "wind_speed_10m",
+    "wind_direction_10m", "wind_gusts_10m",
+]
+HOURLY_VARIABLES = [
+    "temperature_2m", "relative_humidity_2m", "dew_point_2m",
+    "precipitation", "snowfall", "snow_depth", "precipitation_probability",
+    "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
+    "surface_pressure", "cloud_cover",
+]
+# Bu üç model Türkiye dahil küresel kapsama sahip modellerdir.
+# GFS için güncel ad ve eski uyumlu ad sırayla denenir.
+FORECAST_MODELS = [
+    ("ECMWF IFS", "ECMWF_IFS", ["ecmwf_ifs"]),
+    ("GFS", "GFS", ["ncep_gfs_seamless", "gfs_seamless"]),
+    ("ICON", "ICON", ["icon_seamless", "dwd_icon_seamless"]),
+]
+
+
+def _open_meteo_get(url, params, timeout=20):
+  """Open-Meteo yanıtını HTTP ve API hata gövdeleriyle birlikte doğrula."""
+  response = requests.get(url, params=params, timeout=timeout)
+  try:
+    payload = response.json()
+  except Exception:
+    payload = {}
+  if not response.ok or payload.get("error"):
+    reason = payload.get("reason") or payload.get("message") or response.text[:300]
+    raise RuntimeError(f"Open-Meteo HTTP {response.status_code}: {reason}")
+  return payload
+
+
+def _safe_number(value, default=0.0):
+  try:
+    if value is None or pd.isna(value):
+      return float(default)
+    return float(value)
+  except (TypeError, ValueError):
+    return float(default)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_weather_bundle(latitude, longitude):
+  """Seçilen koordinat için Best Match + ayrı ayrı üç model verisini getir."""
+  common_params = {
+      "latitude": float(latitude),
+      "longitude": float(longitude),
+      "hourly": ",".join(HOURLY_VARIABLES),
+      "forecast_days": 7,
+      "timezone": "auto",
+      "temperature_unit": "celsius",
+      "wind_speed_unit": "kmh",
+      "precipitation_unit": "mm",
+  }
+  best_params = dict(common_params)
+  best_params["current"] = ",".join(CURRENT_VARIABLES)
+  best_data = _open_meteo_get(OPEN_METEO_FORECAST_URL, best_params)
+  best_hourly = best_data.get("hourly") or {}
+  if not best_hourly.get("time"):
+    raise RuntimeError("Best Match tahmin yanıtında saatlik zaman dizisi bulunamadı.")
+
+  df = pd.DataFrame(best_hourly)
+  df["time"] = pd.to_datetime(df["time"], errors="coerce")
+  df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+  # Best Match sütunlarını model karşılaştırma grafiklerinde açıkça etiketle.
+  for variable in HOURLY_VARIABLES:
+    if variable in df.columns:
+      df[f"{variable}_BEST_MATCH"] = df[variable]
+
+  model_status = {}
+  model_errors = {}
+  from concurrent.futures import ThreadPoolExecutor, as_completed
+
+  def fetch_one_model(model_spec):
+    display_name, suffix, model_ids = model_spec
+    last_error = None
+    for model_id in model_ids:
+      params = dict(common_params)
+      params["models"] = model_id
+      try:
+        data = _open_meteo_get(OPEN_METEO_FORECAST_URL, params)
+        hourly = data.get("hourly") or {}
+        if not hourly.get("time"):
+          raise RuntimeError("Model yanıtında saatlik zaman dizisi yok.")
+        model_df = pd.DataFrame(hourly)
+        model_df["time"] = pd.to_datetime(model_df["time"], errors="coerce")
+        model_df = model_df.dropna(subset=["time"])
+        rename = {col: f"{col}_{suffix}" for col in model_df.columns if col != "time"}
+        model_df = model_df.rename(columns=rename)
+        return display_name, suffix, model_df, model_id
+      except Exception as exc:
+        last_error = exc
+    raise RuntimeError(f"{display_name}: {last_error}")
+
+  with ThreadPoolExecutor(max_workers=3) as executor:
+    futures = {executor.submit(fetch_one_model, spec): spec for spec in FORECAST_MODELS}
+    for future in as_completed(futures):
+      spec = futures[future]
+      display_name, suffix = spec[0], spec[1]
+      try:
+        result_name, result_suffix, model_df, model_id = future.result()
+        df = df.merge(model_df, on="time", how="left")
+        model_columns = [c for c in model_df.columns if c != "time"]
+        populated = sum(1 for col in model_columns if col in df.columns and df[col].notna().any())
+        model_status[result_name] = {
+            "model_id": model_id,
+            "available_fields": populated,
+            "requested_fields": len(HOURLY_VARIABLES),
+        }
+      except Exception as exc:
+        model_errors[display_name] = str(exc)
+
+  df = df.sort_values("time").reset_index(drop=True)
+  return best_data, df, model_status, model_errors
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_archive_data(latitude, longitude, start_date, end_date):
+  params = {
+      "latitude": float(latitude),
+      "longitude": float(longitude),
+      "start_date": str(start_date),
+      "end_date": str(end_date),
+      "hourly": "temperature_2m,precipitation",
+      "timezone": "auto",
+      "temperature_unit": "celsius",
+      "precipitation_unit": "mm",
+  }
+  payload = _open_meteo_get(OPEN_METEO_ARCHIVE_URL, params, timeout=20)
+  hourly = payload.get("hourly") or {}
+  if not hourly.get("time"):
+    return pd.DataFrame()
+  archive_df = pd.DataFrame(hourly)
+  archive_df["time"] = pd.to_datetime(archive_df["time"], errors="coerce")
+  return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
@@ -379,11 +522,21 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
       loc_b = geolocator.geocode(baslangic_yer, timeout=5)
       loc_v = geolocator.geocode(bitis_yer, timeout=5)
       if loc_b and loc_v:
-        url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        
-        res_b = requests.get(url_b, timeout=5).json().get("current", {})
-        res_v = requests.get(url_v, timeout=5).json().get("current", {})
+        route_current_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+        route_params_b = {
+            "latitude": loc_b.latitude, "longitude": loc_b.longitude,
+            "current": route_current_vars, "timezone": "auto",
+            "wind_speed_unit": "kmh", "precipitation_unit": "mm",
+        }
+        route_params_v = {
+            "latitude": loc_v.latitude, "longitude": loc_v.longitude,
+            "current": route_current_vars, "timezone": "auto",
+            "wind_speed_unit": "kmh", "precipitation_unit": "mm",
+        }
+        res_b = _open_meteo_get(OPEN_METEO_FORECAST_URL, route_params_b, timeout=15).get("current", {})
+        res_v = _open_meteo_get(OPEN_METEO_FORECAST_URL, route_params_v, timeout=15).get("current", {})
+        res_b = {k: _safe_number(res_b.get(k)) for k in route_current_vars.split(",")}
+        res_v = {k: _safe_number(res_v.get(k)) for k in route_current_vars.split(",")}
 
         st.markdown("---")
         st.subheader(f"🗺️ Güzergah Analiz Özeti: {baslangic_yer} ➡️ {bitis_yer}")
@@ -429,6 +582,8 @@ if search_button and search_query:
       st.session_state.lon = location.longitude
       st.session_state.zoom = 12
       st.session_state.son_arama = search_query
+      st.session_state.location_label = location.address
+      st.session_state.skip_map_event_once = True
       st.success(f"Bulunan Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
     else:
       st.error("Aradığınız konum bulunamadı.")
@@ -475,25 +630,63 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Çizim Aracı")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya dilediğiniz noktaya tıklayabilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480)
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v6")
 
-if map_data:
-  if map_data.get("last_active_drawing"):
-    geom = map_data["last_active_drawing"].get("geometry", {})
+# Arama ile yeni konum seçildiyse harita bileşeninin önceki tıklama/çizim olayını
+# bir kez yok say; böylece eski harita olayı aramayla seçilen koordinatı ezemez.
+skip_map_event = st.session_state.pop("skip_map_event_once", False)
+if map_data and skip_map_event:
+  clicked = map_data.get("last_clicked")
+  if clicked:
+    st.session_state.processed_map_click_signature = (
+        round(float(clicked["lat"]), 6), round(float(clicked["lng"]), 6)
+    )
+  drawing = map_data.get("last_active_drawing")
+  if drawing:
+    geom = drawing.get("geometry", {})
+    if geom.get("type") == "Polygon":
+      coords = geom.get("coordinates", [[]])[0]
+      open_ring = coords[:-1] if len(coords) > 1 and coords[0] == coords[-1] else coords
+      st.session_state.processed_polygon_signature = tuple(
+          (round(float(c[0]), 6), round(float(c[1]), 6)) for c in open_ring
+      )
+
+if map_data and not skip_map_event:
+  drawing = map_data.get("last_active_drawing")
+  if drawing:
+    geom = drawing.get("geometry", {})
     if geom.get("type") == "Polygon":
       coords = geom.get("coordinates", [[]])[0]
       if coords:
-        lats = [c[1] for c in coords]
-        lons = [c[0] for c in coords]
-        st.session_state.lat = sum(lats) / len(lats)
-        st.session_state.lon = sum(lons) / len(lons)
-        st.rerun()
+        # GeoJSON halkasında ilk nokta sonda tekrar ediyorsa merkezi hesaba iki kez katma.
+        open_ring = coords[:-1] if len(coords) > 1 and coords[0] == coords[-1] else coords
+        polygon_signature = tuple((round(float(c[0]), 6), round(float(c[1]), 6)) for c in open_ring)
+        if polygon_signature and polygon_signature != st.session_state.get("processed_polygon_signature"):
+          st.session_state.processed_polygon_signature = polygon_signature
+          lats = [float(c[1]) for c in open_ring]
+          lons = [float(c[0]) for c in open_ring]
+          st.session_state.lat = sum(lats) / len(lats)
+          st.session_state.lon = sum(lons) / len(lons)
+          st.session_state.location_label = "Haritada çizilen bölgenin merkezi"
+          # Aynı render'daki eski tıklama olayı çizim merkezini ezmesin.
+          clicked_after_draw = map_data.get("last_clicked")
+          if clicked_after_draw:
+            st.session_state.processed_map_click_signature = (
+                round(float(clicked_after_draw["lat"]), 6),
+                round(float(clicked_after_draw["lng"]), 6),
+            )
+          st.rerun()
 
-  elif map_data.get("last_clicked"):
-    st.session_state.lat = map_data["last_clicked"]["lat"]
-    st.session_state.lon = map_data["last_clicked"]["lng"]
-    st.session_state.zoom = m.options["zoom"]
-    st.rerun()
+  clicked = map_data.get("last_clicked")
+  if clicked:
+    click_signature = (round(float(clicked["lat"]), 6), round(float(clicked["lng"]), 6))
+    if click_signature != st.session_state.get("processed_map_click_signature"):
+      st.session_state.processed_map_click_signature = click_signature
+      st.session_state.lat = float(clicked["lat"])
+      st.session_state.lon = float(clicked["lng"])
+      st.session_state.zoom = m.options["zoom"]
+      st.session_state.location_label = "Harita üzerinde seçilen nokta"
+      st.rerun()
 
 def degrees_to_cardinal(deg):
   if deg is None:
@@ -502,247 +695,246 @@ def degrees_to_cardinal(deg):
   val = int((deg / 45) + 0.5)
   return dirs[(val % 8)]
 
-if st.session_state.lat and st.session_state.lon:
+if st.session_state.lat is not None and st.session_state.lon is not None:
   st.markdown("---")
-  st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
+  st.success(
+      f"Aktif Analiz Konumu: {st.session_state.get('location_label', 'Seçilen konum')} "
+      f"| Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}"
+  )
 
-  with st.spinner("Model verileri ve akıllı kademeli analiz yükleniyor..."):
-    forecast_urls_to_try = [
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7",
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless&forecast_days=7",
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&forecast_days=7"
-    ]
+  weather_error = None
+  with st.spinner("Seçilen koordinat için Best Match ve ECMWF / GFS / ICON modelleri alınıyor..."):
+    try:
+      # Harita/arama ile seçilen koordinatları yuvarlamadan API'ye gönder.
+      request_lat = float(st.session_state.lat)
+      request_lon = float(st.session_state.lon)
+      f_data, df, model_status, model_errors = fetch_weather_bundle(request_lat, request_lon)
+      current_payload = f_data.get("current") or {}
+      current_data = {
+          key: _safe_number(current_payload.get(key))
+          for key in CURRENT_VARIABLES if key in current_payload
+      }
+      local_time_text = current_payload.get("time")
+      if not local_time_text:
+        local_time_text = (f_data.get("hourly") or {}).get("time", [None])[0]
+      today = pd.to_datetime(local_time_text).date() if local_time_text else date.today()
+      current_wind = _safe_number(current_data.get("wind_speed_10m"))
+      current_gust = _safe_number(current_data.get("wind_gusts_10m"))
+      current_snow = _safe_number(current_data.get("snowfall"))
 
-    today = date.today()
-    start_date = today - timedelta(days=7)
-    archive_url = (
-        f"https://archive-api.open-meteo.com/v1/archive?latitude={st.session_state.lat}&longitude={st.session_state.lon}"
-        f"&start_date={start_date}&end_date={today}&hourly=temperature_2m,precipitation"
-    )
-
-    f_response = None
-    for url in forecast_urls_to_try:
-      for attempt in range(2):
-        try:
-          res = requests.get(url, timeout=12)
-          if res.status_code == 200:
-            f_response = res
-            break
-          time.sleep(0.5)
-        except Exception:
-          time.sleep(0.5)
-      if f_response and f_response.status_code == 200:
-        break
-
-    a_response = None
-    for attempt in range(2):
+      start_date = today - timedelta(days=7)
       try:
-        res_a = requests.get(archive_url, timeout=12)
-        if res_a.status_code == 200:
-          a_response = res_a
-          break
-        time.sleep(0.5)
-      except Exception:
-        time.sleep(0.5)
+        df_archive = fetch_archive_data(request_lat, request_lon, start_date.isoformat(), today.isoformat())
+      except Exception as archive_exc:
+        df_archive = pd.DataFrame()
+        st.warning(f"Geçmiş arşiv verisi alınamadı: {archive_exc}")
 
-    if f_response and f_response.status_code == 200:
-      f_data = f_response.json()
-      hourly_data = f_data.get("hourly", {})
-      df = pd.DataFrame(hourly_data)
-      df["time"] = pd.to_datetime(df["time"])
       csv_data = df.to_csv(index=False).encode("utf-8")
 
+      status_cols = st.columns(4)
+      with status_cols[0]:
+        st.metric("Best Match", "Alındı")
+      for idx, model_name in enumerate(["ECMWF IFS", "GFS", "ICON"], start=1):
+        with status_cols[idx]:
+          if model_name in model_status:
+            info = model_status[model_name]
+            st.metric(model_name, f"{info['available_fields']}/{info['requested_fields']} parametre")
+          else:
+            st.metric(model_name, "Veri yok")
+      if model_errors:
+        for model_name, model_error in model_errors.items():
+          st.warning(f"{model_name} modeli bu konum/zaman için alınamadı: {model_error}")
+      st.caption("Anlık durum ve temel tahminler Open-Meteo Best Match kaynağından; model karşılaştırmaları ECMWF IFS, GFS ve ICON'un ayrı isteklerinden alınır. Saat dilimi seçilen koordinata göre otomatik belirlenir.")
+    except Exception as exc:
+      weather_error = str(exc)
+      df = pd.DataFrame()
       df_archive = pd.DataFrame()
-      if a_response and a_response.status_code == 200:
-        a_data = a_response.json()
-        df_archive = pd.DataFrame(a_data.get("hourly", {}))
-        if not df_archive.empty:
-          df_archive["time"] = pd.to_datetime(df_archive["time"])
+      current_data = {}
+      current_wind = 0.0
+      current_gust = 0.0
+      current_snow = 0.0
+      csv_data = b""
 
-      current_data = f_data.get("current", {})
-      current_wind = current_data.get("wind_speed_10m", 0.0) if current_data else 0.0
-      current_gust = current_data.get("wind_gusts_10m", 0.0) if current_data else 0.0
-      current_snow = current_data.get("snowfall", 0.0) if current_data else 0.0
+  if weather_error is None:
+    df_3days = df.head(72)
 
-      df_3days = df.head(72)
+    # --- GÜNÜN RİSK ÖZETİ BANNERI ---
+    st.markdown("### 🚨 Günün Meteorolojik Risk Özeti ve Canlı Uyarılar")
+    uyarilar = konum_uyari_analizi(current_data, df_3days)
+    for seviye, mesaj in uyarilar:
+      if seviye == "kirmizi":
+        st.error(mesaj)
+      elif seviye == "sari":
+        st.warning(mesaj)
+      else:
+        st.success(mesaj)
 
-      # --- GÜNÜN RİSK ÖZETİ BANNERI ---
-      st.markdown("### 🚨 Günün Meteorolojik Risk Özeti ve Canlı Uyarılar")
-      uyarilar = konum_uyari_analizi(current_data, df_3days)
-      for seviye, mesaj in uyarilar:
-        if seviye == "kirmizi":
-          st.error(mesaj)
-        elif seviye == "sari":
-          st.warning(mesaj)
-        else:
-          st.success(mesaj)
+    # --- 3 GÜNLÜK GÜN GÜN (TARİH TARİH) TAHMİN KUTULARI ---
+    st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
+    if not df_3days.empty:
+      df_3days["date"] = df_3days["time"].dt.date
+      unique_dates = df_3days["date"].unique()[:3]
 
-      # --- 3 GÜNLÜK GÜN GÜN (TARİH TARİH) TAHMİN KUTULARI ---
-      st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
-      if not df_3days.empty:
-        df_3days["date"] = df_3days["time"].dt.date
-        unique_dates = df_3days["date"].unique()[:3]
+      cols_day = st.columns(len(unique_dates) if len(unique_dates) > 0 else 1)
+      
+      for idx, d in enumerate(unique_dates):
+        day_df = df_3days[df_3days["date"] == d]
+        t_cols = [c for c in day_df.columns if "temperature_2m" in c]
+        d_min_t = day_df[t_cols].min().min() if t_cols else 0
+        d_max_t = day_df[t_cols].max().max() if t_cols else 0
+        d_precip = day_df["precipitation"].sum() if "precipitation" in day_df.columns else 0
+        d_snow = day_df["snowfall"].sum() if "snowfall" in day_df.columns else 0
+        d_wind = day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else 0
 
-        cols_day = st.columns(len(unique_dates) if len(unique_dates) > 0 else 1)
-        
-        for idx, d in enumerate(unique_dates):
-          day_df = df_3days[df_3days["date"] == d]
-          t_cols = [c for c in day_df.columns if "temperature_2m" in c]
-          d_min_t = day_df[t_cols].min().min() if t_cols else 0
-          d_max_t = day_df[t_cols].max().max() if t_cols else 0
-          d_precip = day_df["precipitation"].sum() if "precipitation" in day_df.columns else 0
-          d_snow = day_df["snowfall"].sum() if "snowfall" in day_df.columns else 0
-          d_wind = day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else 0
+        gun_ismi = pd.to_datetime(d).strftime('%A')
+        gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
 
-          gun_ismi = pd.to_datetime(d).strftime('%A')
-          gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
+        with cols_day[idx]:
+          with st.container(border=True):
+            st.markdown(f"**📌 {d} ({gun_tr})**")
+            st.metric(label="Min / Max Sıcaklık", value=f"{d_min_t:.1f}°C / {d_max_t:.1f}°C")
+            st.metric(label="Toplam Yağış / Kar", value=f"{d_precip:.1f} mm / {d_snow:.1f} cm")
+            st.metric(label="Max Rüzgar Hamlesi", value=f"{d_wind:.1f} km/s")
 
-          with cols_day[idx]:
-            with st.container(border=True):
-              st.markdown(f"**📌 {d} ({gun_tr})**")
-              st.metric(label="Min / Max Sıcaklık", value=f"{d_min_t:.1f}°C / {d_max_t:.1f}°C")
-              st.metric(label="Toplam Yağış / Kar", value=f"{d_precip:.1f} mm / {d_snow:.1f} cm")
-              st.metric(label="Max Rüzgar Hamlesi", value=f"{d_wind:.1f} km/s")
+    if current_data:
+      st.markdown("### ⚡ Anlık Meteorolojik Durum")
+      wind_deg = current_data.get("wind_direction_10m", 0)
+      wind_cardinal = degrees_to_cardinal(wind_deg)
 
-      if current_data:
-        st.markdown("### ⚡ Anlık Meteorolojik Durum")
-        wind_deg = current_data.get("wind_direction_10m", 0)
-        wind_cardinal = degrees_to_cardinal(wind_deg)
+      curr_col1, curr_col2, curr_col3, curr_col4, curr_col5 = st.columns(5)
+      with curr_col1:
+        st.metric(label="Sıcaklık", value=f"{current_data.get('temperature_2m', 0.0):.1f} °C")
+      with curr_col2:
+        st.metric(label="Hissedilen", value=f"{current_data.get('apparent_temperature', 0.0):.1f} °C")
+      with curr_col3:
+        st.metric(label="Bağıl Nem", value=f"{current_data.get('relative_humidity_2m', 0.0):.1f} %")
+      with curr_col4:
+        st.metric(label="Rüzgar Hızı / Hamle", value=f"{current_wind:.1f} / {current_gust:.1f} km/s")
+      with curr_col5:
+        st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} ({wind_deg}°)")
 
-        curr_col1, curr_col2, curr_col3, curr_col4, curr_col5 = st.columns(5)
-        with curr_col1:
-          st.metric(label="Sıcaklık", value=f"{current_data.get('temperature_2m', 0.0):.1f} °C")
-        with curr_col2:
-          st.metric(label="Hissedilen", value=f"{current_data.get('apparent_temperature', 0.0):.1f} °C")
-        with curr_col3:
-          st.metric(label="Bağıl Nem", value=f"{current_data.get('relative_humidity_2m', 0.0):.1f} %")
-        with curr_col4:
-          st.metric(label="Rüzgar Hızı / Hamle", value=f"{current_wind:.1f} / {current_gust:.1f} km/s")
-        with curr_col5:
-          st.metric(label="Rüzgar Yönü", value=f"{wind_cardinal} ({wind_deg}°)")
+    st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
 
-      st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "🤝 3'lü Model Konsensüsü (Gelişmiş)",
+        "🕰️ Geçmiş Arşiv",
+        "📄 Otomatik Uzman Raporu",
+        "🌡️ Sıcaklık & Nem",
+        "💨 Hassas Rüzgar & Hamle",
+        "☁️ Basınç & Bulut",
+        "❄️ Yağış, Kar & Olasılık",
+        "📋 Ham Veri & İndirme",
+    ])
 
-      tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-          "🤝 3'lü Model Konsensüsü (Gelişmiş)",
-          "🕰️ Geçmiş Arşiv",
-          "📄 Otomatik Uzman Raporu",
-          "🌡️ Sıcaklık & Nem",
-          "💨 Hassas Rüzgar & Hamle",
-          "☁️ Basınç & Bulut",
-          "❄️ Yağış, Kar & Olasılık",
-          "📋 Ham Veri & İndirme",
-      ])
+    with tab1:
+      st.subheader("🌐 Küresel Modeller Arası Karşılaştırma ve Konsensüs Analizi")
+      st.markdown("Aşağıdaki grafiklerde **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
 
-      with tab1:
-        st.subheader("🌐 Küresel Modeller Arası Karşılaştırma ve Konsensüs Analizi")
-        st.markdown("Aşağıdaki grafiklerde **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
+      st.write("**1. Sıcaklık Modelleri Karşılaştırması (°C):**")
+      model_temp_cols = [c for c in df.columns if c.startswith("temperature_2m_")]
+      if model_temp_cols:
+        st.line_chart(df.set_index("time")[model_temp_cols])
+      else:
+        st.line_chart(df.set_index("time")[["temperature_2m"]])
 
-        st.write("**1. Sıcaklık Modelleri Karşılaştırması (°C):**")
-        model_temp_cols = [c for c in df.columns if "temperature_2m" in c and "_" in c]
-        if model_temp_cols:
-          st.line_chart(df.set_index("time")[model_temp_cols])
-        else:
-          st.line_chart(df.set_index("time")[["temperature_2m"]])
+      st.write("**2. Rüzgar Hızı Modelleri Karşılaştırması (km/s):**")
+      model_wind_cols = [c for c in df.columns if c.startswith("wind_speed_10m_")]
+      if model_wind_cols:
+        st.line_chart(df.set_index("time")[model_wind_cols])
+      else:
+        st.line_chart(df.set_index("time")[["wind_speed_10m"]])
 
-        st.write("**2. Rüzgar Hızı Modelleri Karşılaştırması (km/s):**")
-        model_wind_cols = [c for c in df.columns if "wind_speed_10m" in c and "_" in c]
-        if model_wind_cols:
-          st.line_chart(df.set_index("time")[model_wind_cols])
-        else:
-          st.line_chart(df.set_index("time")[["wind_speed_10m"]])
+      st.write("**3. Yağış Modelleri Karşılaştırması (mm):**")
+      model_precip_cols = [c for c in df.columns if c.startswith("precipitation_")]
+      if model_precip_cols:
+        st.line_chart(df.set_index("time")[model_precip_cols])
+      else:
+        st.line_chart(df.set_index("time")[["precipitation"]])
 
-        st.write("**3. Yağış Modelleri Karşılaştırması (mm):**")
-        model_precip_cols = [c for c in df.columns if "precipitation" in c and "_" in c]
-        if model_precip_cols:
-          st.line_chart(df.set_index("time")[model_precip_cols])
-        else:
-          st.line_chart(df.set_index("time")[["precipitation"]])
+    with tab2:
+      st.subheader("Geçmiş 7 Günün Arşiv Verileri")
+      if not df_archive.empty:
+        st.line_chart(df_archive.set_index("time")[["temperature_2m", "precipitation"]])
+        st.dataframe(df_archive, use_container_width=True)
+      else:
+        st.info("Arşiv verisi bulunamadı.")
 
-      with tab2:
-        st.subheader("Geçmiş 7 Günün Arşiv Verileri")
-        if not df_archive.empty:
-          st.line_chart(df_archive.set_index("time")[["temperature_2m", "precipitation"]])
-          st.dataframe(df_archive, use_container_width=True)
-        else:
-          st.info("Arşiv verisi bulunamadı.")
+    with tab3:
+      st.subheader("📄 Otomatik Meteorolojik Durum Raporu")
+      t_all = [c for c in df_3days.columns if "temperature_2m" in c]
+      rep_min = df_3days[t_all].min().min() if t_all else 0
+      rep_max = df_3days[t_all].max().max() if t_all else 0
+      rep_precip = df_3days["precipitation"].sum() if "precipitation" in df_3days.columns else 0
+      rep_snow = df_3days["snowfall"].sum() if "snowfall" in df_3days.columns else 0
+      rep_wind = df_3days["wind_speed_10m"].max() if "wind_speed_10m" in df_3days.columns else 0
 
-      with tab3:
-        st.subheader("📄 Otomatik Meteorolojik Durum Raporu")
-        t_all = [c for c in df_3days.columns if "temperature_2m" in c]
-        rep_min = df_3days[t_all].min().min() if t_all else 0
-        rep_max = df_3days[t_all].max().max() if t_all else 0
-        rep_precip = df_3days["precipitation"].sum() if "precipitation" in df_3days.columns else 0
-        rep_snow = df_3days["snowfall"].sum() if "snowfall" in df_3days.columns else 0
-        rep_wind = df_3days["wind_speed_10m"].max() if "wind_speed_10m" in df_3days.columns else 0
+      ortalama_sicaklik_degeri = (rep_min + rep_max) / 2
+      giyim_tavsiyesi_metni = giyim_onerisi_olustur(
+          ortalama_sicaklik_degeri, rep_precip, rep_snow, 50, rep_wind
+      )
 
-        ortalama_sicaklik_degeri = (rep_min + rep_max) / 2
-        giyim_tavsiyesi_metni = giyim_onerisi_olustur(
-            ortalama_sicaklik_degeri, rep_precip, rep_snow, 50, rep_wind
-        )
+      report_text = f"""
+      METEOROLOJİK UZMAN ANALİZ RAPORU
+      ----------------------------------------------
+      Konum Koordinatları: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}
+      Rapor Tarihi: {today.strftime('%Y-%m-%d')}
+      
+      1. GÜNÜN RİSK ÖZETİ VE ANLIK DURUM:
+      - Sıcaklık: {current_data.get('temperature_2m', 0.0):.1f} °C (Hissedilen: {current_data.get('apparent_temperature', 0.0):.1f} °C)
+      - Kar Yağışı (Anlık): {current_snow:.1f} cm
+      - Rüzgar Hızı / Hamle: {current_wind:.1f} / {current_gust:.1f} km/s
+      
+      2. 3 GÜNLÜK GÜN GÜN (BÖLÜNMÜŞ) TAHMİN TRENDİ:
+      - Önümüzdeki 3 günlük periyotta sıcaklık {rep_min:.1f}°C ile {rep_max:.1f}°C arasında seyredecek olup, veriler günlük bazda (tarih kırılımlı) izlenmektedir.
+      - Toplam Yağış / Kar Beklentisi: {rep_precip:.1f} mm / {rep_snow:.1f} cm
+      
+      3. AKILLI GİYİM TAVSİYESİ:
+      {giyim_tavsiyesi_metni.replace('**', '').replace('❄️ ', '').replace('🌪️ ', '').replace('🌧️ ', '').replace('🧥 ', '').replace('👕 ', '').replace('👔 ', '')}
+      """
 
-        report_text = f"""
-        METEOROLOJİK UZMAN ANALİZ RAPORU
-        ----------------------------------------------
-        Konum Koordinatları: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}
-        Rapor Tarihi: {date.today().strftime('%Y-%m-%d')}
-        
-        1. GÜNÜN RİSK ÖZETİ VE ANLIK DURUM:
-        - Sıcaklık: {current_data.get('temperature_2m', 0.0):.1f} °C (Hissedilen: {current_data.get('apparent_temperature', 0.0):.1f} °C)
-        - Kar Yağışı (Anlık): {current_snow:.1f} cm
-        - Rüzgar Hızı / Hamle: {current_wind:.1f} / {current_gust:.1f} km/s
-        
-        2. 3 GÜNLÜK GÜN GÜN (BÖLÜNMÜŞ) TAHMİN TRENDİ:
-        - Önümüzdeki 3 günlük periyotta sıcaklık {rep_min:.1f}°C ile {rep_max:.1f}°C arasında seyredecek olup, veriler günlük bazda (tarih kırılımlı) izlenmektedir.
-        - Toplam Yağış / Kar Beklentisi: {rep_precip:.1f} mm / {rep_snow:.1f} cm
-        
-        3. AKILLI GİYİM TAVSİYESİ:
-        {giyim_tavsiyesi_metni.replace('**', '').replace('❄️ ', '').replace('🌪️ ', '').replace('🌧️ ', '').replace('🧥 ', '').replace('👕 ', '').replace('👔 ', '')}
-        """
+      st.info(giyim_tavsiyesi_metni)
+      st.text_area("Rapor Önizlemesi", report_text, height=280)
 
-        st.info(giyim_tavsiyesi_metni)
-        st.text_area("Rapor Önizlemesi", report_text, height=280)
+      st.download_button(
+          label="📥 Uzman Raporunu Metin Olarak İndir",
+          data=report_text.encode("utf-8"),
+          file_name=f"meteo_report_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.txt",
+          mime="text/plain",
+      )
 
-        st.download_button(
-            label="📥 Uzman Raporunu Metin Olarak İndir",
-            data=report_text.encode("utf-8"),
-            file_name=f"meteo_report_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.txt",
-            mime="text/plain",
-        )
+    with tab4:
+      st.subheader("Sıcaklık ve Bağıl Nem / Çiy Noktası")
+      temp_cols = [col for col in df.columns if "temperature_2m" in col or "relative_humidity_2m" in col]
+      if temp_cols:
+        st.line_chart(df.set_index("time")[temp_cols])
 
-      with tab4:
-        st.subheader("Sıcaklık ve Bağıl Nem / Çiy Noktası")
-        temp_cols = [col for col in df.columns if "temperature_2m" in col or "relative_humidity_2m" in col]
-        if temp_cols:
-          st.line_chart(df.set_index("time")[temp_cols])
+    with tab5:
+      st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) ve Yön Analizi")
+      wind_cols = [col for col in df.columns if "speed" in col or "gusts" in col]
+      if wind_cols:
+        st.line_chart(df.set_index("time")[wind_cols])
 
-      with tab5:
-        st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) ve Yön Analizi")
-        wind_cols = [col for col in df.columns if "speed" in col or "gusts" in col]
-        if wind_cols:
-          st.line_chart(df.set_index("time")[wind_cols])
+    with tab6:
+      st.subheader("Atmosferik Basınç ve Bulut Örtüsü")
+      press_cols = [col for col in df.columns if "pressure" in col or "cloud_cover" in col]
+      if press_cols:
+        st.line_chart(df.set_index("time")[press_cols])
 
-      with tab6:
-        st.subheader("Atmosferik Basınç ve Bulut Örtüsü")
-        press_cols = [col for col in df.columns if "pressure" in col or "cloud_cover" in col]
-        if press_cols:
-          st.line_chart(df.set_index("time")[press_cols])
+    with tab7:
+      st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
+      rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
+      if rain_snow_cols:
+        st.line_chart(df.set_index("time")[rain_snow_cols])
 
-      with tab7:
-        st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
-        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
-        if rain_snow_cols:
-          st.line_chart(df.set_index("time")[rain_snow_cols])
+    with tab8:
+      st.subheader("Ham Veri Tablosu ve Dışa Aktarım")
+      st.download_button(
+          label="📥 Tahmin Verilerini CSV Olarak İndir",
+          data=csv_data,
+          file_name=f"meteo_forecast_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.csv",
+          mime="text/csv",
+      )
+      st.dataframe(df, use_container_width=True)
 
-      with tab8:
-        st.subheader("Ham Veri Tablosu ve Dışa Aktarım")
-        st.download_button(
-            label="📥 Tahmin Verilerini CSV Olarak İndir",
-            data=csv_data,
-            file_name=f"meteo_forecast_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.csv",
-            mime="text/csv",
-        )
-        st.dataframe(df, use_container_width=True)
-
-    else:
-      st.error("Veriler API sunucusundan alınamadı. Lütfen internet bağlantınızı kontrol edin.")
+  else:
+    st.error(f"Meteoroloji verileri alınamadı: {weather_error}")
