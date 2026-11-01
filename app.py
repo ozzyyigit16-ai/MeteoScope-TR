@@ -23,32 +23,36 @@ st.set_page_config(
 )
 
 # --- KALICI VE DİNAMİK ZİYARET / AKTİF OTURUM SİSTEMİ ---
-# SQLite dosyası uygulamanın kalıcı diskinde tutulmalıdır.
+# Aynı tarayıcıdaki tekrar girişler ve sekmeler aynı kalıcı cookie kimliğini kullanır.
 COUNTER_DB = "meteo_counters.db"
 ACTIVE_TIMEOUT_SECONDS = 45
 
 cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
 
-# Ziyaretçi kimliğini mümkün olduğunca HTTP isteğiyle birlikte gelen
-# tarayıcı çerezinden oku. CookieManager.get() bileşeni ilk render'da henüz
-# hazır olmayabildiği için burada ona güvenmek, her yeni Streamlit oturumunda
-# yanlışlıkla yeni UUID üretilmesine yol açabiliyordu.
+# Önce HTTP isteğiyle gelen cookie'yi oku. Bazı Streamlit oturumlarında
+# component üzerinden okuma gerekebildiğinden CookieManager.get() de yedektir.
 try:
     cookie_visitor_id = st.context.cookies.get("meteo_visitor_id")
 except Exception:
-    # Eski Streamlit sürümleri için geriye dönük uyumluluk.
     cookie_visitor_id = None
+
+if not cookie_visitor_id:
+    try:
+        cookie_visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
+    except Exception:
+        cookie_visitor_id = None
 
 if cookie_visitor_id:
     visitor_id = str(cookie_visitor_id)
     st.session_state["meteo_visitor_id"] = visitor_id
 else:
-    # Aynı Streamlit oturumu içindeki rerun'larda kimliği koru.
+    # CookieManager ilk render'da henüz hazır değilse aynı Streamlit oturumu
+    # boyunca UUID'yi session_state'te koru; cookie'yi kalıcı olarak yaz.
     visitor_id = st.session_state.get("meteo_visitor_id")
     if not visitor_id:
         visitor_id = str(uuid.uuid4())
         st.session_state["meteo_visitor_id"] = visitor_id
-        # Yalnızca ilk kez kimlik oluşturulduğunda tarayıcı çerezine yaz.
+    try:
         cookie_manager.set(
             cookie="meteo_visitor_id",
             val=visitor_id,
@@ -56,9 +60,13 @@ else:
             expires_at=datetime.now() + timedelta(days=3650),
             same_site="lax",
         )
+    except Exception:
+        pass
+
 
 def initialize_counter_db():
-    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS unique_visitors (
                 visitor_id TEXT PRIMARY KEY,
@@ -71,26 +79,43 @@ def initialize_counter_db():
                 last_seen REAL NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS counter_meta (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL
+            )
+        """)
+        # V4 ilk kez çalıştığında yalnızca toplam ziyaretçi geçmişini bir kez
+        # sıfırlar. Meta işareti sayesinde her rerun/deploy sonrası tekrar silinmez.
+        conn.execute("BEGIN IMMEDIATE")
+        already_reset = conn.execute(
+            "SELECT 1 FROM counter_meta WHERE meta_key = ?",
+            ("unique_visitors_reset_v4",),
+        ).fetchone()
+        if not already_reset:
+            conn.execute("DELETE FROM unique_visitors")
+            conn.execute(
+                "INSERT INTO counter_meta (meta_key, meta_value) VALUES (?, ?)",
+                ("unique_visitors_reset_v4", str(time.time())),
+            )
         conn.commit()
+
 
 def register_unique_visitor(current_visitor_id):
     now = time.time()
-    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
-        # Aynı tarayıcı daha önce kaydedildiyse toplam ziyaretçi artmaz.
+    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
         conn.execute(
             "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
             (current_visitor_id, now),
         )
         conn.commit()
 
+
 def refresh_active_session(current_visitor_id):
     now = time.time()
     cutoff = now - ACTIVE_TIMEOUT_SECONDS
-    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
-        # Zaman aşımına uğramış oturumlar aktif listeden çıkarılır.
+    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
         conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
-        # visitor_id tarayıcı cookie'sinden geldiği için aynı tarayıcının
-        # farklı sekmeleri aynı satırı günceller; ayrı kişi gibi çoğalmaz.
         conn.execute("""
             INSERT INTO active_sessions (visitor_id, last_seen)
             VALUES (?, ?)
@@ -98,10 +123,10 @@ def refresh_active_session(current_visitor_id):
         """, (current_visitor_id, now))
         conn.commit()
 
+
 def read_counter_values():
-    now = time.time()
-    cutoff = now - ACTIVE_TIMEOUT_SECONDS
-    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+    cutoff = time.time() - ACTIVE_TIMEOUT_SECONDS
+    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
         total_visitors = conn.execute(
             "SELECT COUNT(*) FROM unique_visitors"
         ).fetchone()[0]
@@ -111,12 +136,11 @@ def read_counter_values():
         ).fetchone()[0]
     return total_visitors, active_count
 
+
 initialize_counter_db()
 register_unique_visitor(visitor_id)
 refresh_active_session(visitor_id)
 
-# Bu fragment yönetici girişi gerektirmeden her ziyaretçi için çalışır.
-# Böylece normal kullanıcıların aktif oturumları da sayılır.
 @st.fragment(run_every="15s")
 def maintain_active_heartbeat(current_visitor_id):
     refresh_active_session(current_visitor_id)
@@ -127,13 +151,13 @@ maintain_active_heartbeat(visitor_id)
 def render_live_admin_metrics():
     total_visitors, active_count = read_counter_values()
     st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
-    st.metric(label="Toplam Uygulama Ziyareti", value=f"{total_visitors:,}")
+    st.metric(label="Toplam Benzersiz Ziyaretçi", value=f"{total_visitors:,}")
     st.metric(label="Anlık Aktif Oturum", value=active_count)
     st.metric(
         label="Son Aranan Konum",
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
-    st.caption("Aynı tarayıcıdaki sekmeler tek ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye boyunca sinyal göndermezse pasif kabul edilir.")
+    st.caption("Aynı tarayıcıdaki sekmeler ve tekrar girişler tek ziyaretçi sayılır. Farklı cihazlar/tarayıcılar ayrı ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye sinyal göndermezse pasif kabul edilir.")
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
 def giyim_onerisi_olustur(
