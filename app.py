@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from contextlib import contextmanager
 from geopy.geocoders import Nominatim
 import folium
 from folium.plugins import Draw
@@ -9,11 +10,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 import time
 import os
-import json
-import uuid
 import sqlite3
-from datetime import datetime, timedelta
-import extra_streamlit_components as stx
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -22,62 +19,162 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- KALICI VE DİNAMİK ZİYARET / AKTİF OTURUM SİSTEMİ ---
-# Aynı tarayıcıdaki tekrar girişler ve sekmeler aynı kalıcı cookie kimliğini kullanır.
+# --- BENZERSİZ ZİYARETÇİ / AKTİF CİHAZ SAYACI (V6) ---
+# Kimlik tarayıcı localStorage alanında tutulur. Aynı origin'deki sekmeler
+# localStorage'ı paylaşır; telefon ve bilgisayar ise ayrı kimlik üretir.
+# Bu küçük bileşen Streamlit'in kendi component API'sini kullanır; yeni paket gerekmez.
 COUNTER_DB = "meteo_counters.db"
 ACTIVE_TIMEOUT_SECONDS = 45
 
-cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
 
-# ÖNEMLİ: CookieManager ilk çizimde varsayılan olarak {} döndürebilir.
-# Bu, tarayıcıda gerçekten cookie olmadığı anlamına gelmez. Önce ayrı bir
-# component çağrısının hazır olmasını bekliyoruz. Böylece var olan ziyaretçi
-# kimliği okunmadan yeni UUID üretip eski kimliğin üzerine yazmıyoruz.
-try:
-    browser_cookies = cookie_manager.cookie_manager(
-        method="getAll",
-        key="meteo_visitor_cookie_readiness",
-        default=None,
-    )
-except Exception:
-    browser_cookies = None
+@st.cache_resource(show_spinner=False)
+def get_browser_identity_component():
+    """Tarayıcı localStorage/cookie kimliğini Python'a döndüren mini bileşen."""
+    import streamlit.components.v1 as components
+    import tempfile
 
-# İlk render'da None ise component'in tarayıcıdan cevabı gelene kadar sayaç
-# işlemlerini durdur. Component cevabı geldiğinde Streamlit yeniden çalışır.
-if browser_cookies is None:
+    component_dir = os.path.join(tempfile.gettempdir(), "meteoscope_browser_identity_v6")
+    os.makedirs(component_dir, exist_ok=True)
+    html_path = os.path.join(component_dir, "index.html")
+
+    component_html = r'''<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body>
+<script>
+(function () {
+  "use strict";
+  let alreadyReturned = false;
+
+  function sendToStreamlit(type, data) {
+    const message = Object.assign({isStreamlitMessage: true, type: type}, data || {});
+    window.parent.postMessage(message, "*");
+  }
+
+  function makeId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    }
+    return "v6-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  }
+
+  function readCookie(name) {
+    const prefix = name + "=";
+    const parts = document.cookie ? document.cookie.split(";") : [];
+    for (let part of parts) {
+      part = part.trim();
+      if (part.startsWith(prefix)) {
+        try { return decodeURIComponent(part.slice(prefix.length)); }
+        catch (_) { return part.slice(prefix.length); }
+      }
+    }
+    return null;
+  }
+
+  function writeCookie(name, value) {
+    const secure = window.location.protocol === "https:" ? "; Secure" : "";
+    document.cookie = name + "=" + encodeURIComponent(value) +
+      "; Max-Age=315360000; Path=/; SameSite=Lax" + secure;
+  }
+
+  function readOrCreateId() {
+    let id = null;
+    try { id = window.localStorage.getItem("meteoscope_tr_visitor_id_v1"); }
+    catch (_) { /* Cookie fallback below. */ }
+
+    // V5'ten kalan cookie varsa yeni kimlik üretmek yerine onu devral.
+    if (!id) id = readCookie("meteo_visitor_id");
+    if (!id) id = makeId();
+
+    try { window.localStorage.setItem("meteoscope_tr_visitor_id_v1", id); }
+    catch (_) { /* Cookie remains the fallback store. */ }
+    writeCookie("meteo_visitor_id", id);
+    return id;
+  }
+
+  async function getOrCreateId() {
+    // Web Locks, aynı anda açılan sekmelerin ilk kimliği farklı üretmesini önler.
+    if (navigator.locks && typeof navigator.locks.request === "function") {
+      try {
+        return await navigator.locks.request(
+          "meteoscope-tr-visitor-id-lock",
+          {mode: "exclusive"},
+          () => readOrCreateId()
+        );
+      } catch (_) { /* Continue with localStorage/cookie fallback. */ }
+    }
+    return readOrCreateId();
+  }
+
+  window.addEventListener("message", async function (event) {
+    if (!event.data || event.data.type !== "streamlit:render" || alreadyReturned) return;
+    alreadyReturned = true;
+    try {
+      const visitorId = await getOrCreateId();
+      sendToStreamlit("streamlit:setComponentValue", {
+        value: {ready: true, visitor_id: visitorId}
+      });
+    } catch (error) {
+      sendToStreamlit("streamlit:setComponentValue", {
+        value: {ready: false, error: String(error)}
+      });
+    }
+  });
+
+  sendToStreamlit("streamlit:componentReady", {apiVersion: 1});
+  sendToStreamlit("streamlit:setFrameHeight", {height: 0});
+})();
+</script>
+</body>
+</html>'''
+
+    # Streamlit component'inin statik HTML dosyasını yalnızca bir kez oluştur.
+    if not os.path.exists(html_path):
+        with open(html_path, "w", encoding="utf-8") as html_file:
+            html_file.write(component_html)
+
+    return components.declare_component("meteoscope_browser_identity_v6", path=component_dir)
+
+
+browser_identity_component = get_browser_identity_component()
+identity_result = browser_identity_component(key="meteoscope_browser_identity_v6", default=None, height=0)
+
+if not isinstance(identity_result, dict) or not identity_result.get("ready"):
+    if isinstance(identity_result, dict) and identity_result.get("error"):
+        st.error("Tarayıcı kimliği okunamadı. Tarayıcınızın site verisi/cookie depolamasına izin verip sayfayı yenileyin.")
+    else:
+        st.info("Ziyaretçi kimliği hazırlanıyor...")
     st.stop()
 
-cookie_visitor_id = browser_cookies.get("meteo_visitor_id") if isinstance(browser_cookies, dict) else None
+visitor_id = str(identity_result.get("visitor_id", "")).strip()
+if not visitor_id:
+    st.error("Tarayıcı kimliği boş döndü; ziyaretçi sayacı güvenli şekilde başlatılamadı.")
+    st.stop()
+st.session_state["meteo_visitor_id"] = visitor_id
 
-# HTTP isteği cookie'si de yedek kaynak; component'ten okunan değer öncelikli.
-try:
-    request_cookie_id = st.context.cookies.get("meteo_visitor_id")
-except Exception:
-    request_cookie_id = None
 
-cookie_visitor_id = cookie_visitor_id or request_cookie_id
-
-if cookie_visitor_id:
-    visitor_id = str(cookie_visitor_id)
-    st.session_state["meteo_visitor_id"] = visitor_id
-else:
-    # Sadece tarayıcıdan cookie listesinin hazır olduğu ve gerçekten cookie
-    # bulunmadığı doğrulandıktan sonra yeni kimlik oluştur.
-    visitor_id = st.session_state.get("meteo_visitor_id") or str(uuid.uuid4())
-    st.session_state["meteo_visitor_id"] = visitor_id
-    cookie_manager.set(
-        cookie="meteo_visitor_id",
-        val=visitor_id,
-        path="/",
-        expires_at=datetime.now() + timedelta(days=3650),
-        same_site="lax",
-        secure=True,
-        key="meteo_visitor_id_set",
-    )
+@contextmanager
+def get_counter_connection():
+    """Her sayaç işlemi için bağlantıyı güvenle aç, commit/rollback yap ve kapat."""
+    conn = sqlite3.connect(COUNTER_DB, timeout=20)
+    conn.execute("PRAGMA busy_timeout=20000")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def initialize_counter_db():
-    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
+    with get_counter_connection() as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS unique_visitors (
@@ -97,48 +194,50 @@ def initialize_counter_db():
                 meta_value TEXT NOT NULL
             )
         """)
-        # V4 ilk kez çalıştığında yalnızca toplam ziyaretçi geçmişini bir kez
-        # sıfırlar. Meta işareti sayesinde her rerun/deploy sonrası tekrar silinmez.
+        # Önceki denemelerin sayaç kayıtlarını yalnızca V6'nın ilk çalışmasında
+        # temizle. Her Streamlit rerun'ında veya sekme açılışında sıfırlama yapma.
         conn.execute("BEGIN IMMEDIATE")
-        already_reset = conn.execute(
+        reset_marker = conn.execute(
             "SELECT 1 FROM counter_meta WHERE meta_key = ?",
-            ("unique_visitors_reset_v4",),
+            ("unique_visitors_reset_v6",),
         ).fetchone()
-        if not already_reset:
+        if not reset_marker:
             conn.execute("DELETE FROM unique_visitors")
+            conn.execute("DELETE FROM active_sessions")
             conn.execute(
                 "INSERT INTO counter_meta (meta_key, meta_value) VALUES (?, ?)",
-                ("unique_visitors_reset_v4", str(time.time())),
+                ("unique_visitors_reset_v6", str(time.time())),
             )
         conn.commit()
 
 
 def register_unique_visitor(current_visitor_id):
+    """Aynı tarayıcı/cihaz kimliği veritabanına yalnızca bir kez eklenir."""
     now = time.time()
-    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
-        conn.execute(
+    with get_counter_connection() as conn:
+        cursor = conn.execute(
             "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
             (current_visitor_id, now),
         )
-        conn.commit()
+        return cursor.rowcount == 1
 
 
 def refresh_active_session(current_visitor_id):
+    """Sekmeler aynı visitor_id'yi kullandığından tek aktif cihaz satırı güncellenir."""
     now = time.time()
     cutoff = now - ACTIVE_TIMEOUT_SECONDS
-    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
+    with get_counter_connection() as conn:
         conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
         conn.execute("""
             INSERT INTO active_sessions (visitor_id, last_seen)
             VALUES (?, ?)
             ON CONFLICT(visitor_id) DO UPDATE SET last_seen = excluded.last_seen
         """, (current_visitor_id, now))
-        conn.commit()
 
 
 def read_counter_values():
     cutoff = time.time() - ACTIVE_TIMEOUT_SECONDS
-    with sqlite3.connect(COUNTER_DB, timeout=20) as conn:
+    with get_counter_connection() as conn:
         total_visitors = conn.execute(
             "SELECT COUNT(*) FROM unique_visitors"
         ).fetchone()[0]
@@ -153,11 +252,14 @@ initialize_counter_db()
 register_unique_visitor(visitor_id)
 refresh_active_session(visitor_id)
 
+
 @st.fragment(run_every="15s")
 def maintain_active_heartbeat(current_visitor_id):
     refresh_active_session(current_visitor_id)
 
+
 maintain_active_heartbeat(visitor_id)
+
 
 @st.fragment(run_every="15s")
 def render_live_admin_metrics():
@@ -169,7 +271,7 @@ def render_live_admin_metrics():
         label="Son Aranan Konum",
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
-    st.caption("Aynı tarayıcıdaki sekmeler ve tekrar girişler tek ziyaretçi sayılır. Farklı cihazlar/tarayıcılar ayrı ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye sinyal göndermezse pasif kabul edilir.")
+    st.caption("Aynı tarayıcıdaki sekmeler tek ziyaretçi sayılır. Farklı cihazlar/tarayıcılar ayrı ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye sinyal göndermezse pasif kabul edilir.")
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
 def giyim_onerisi_olustur(
