@@ -16,12 +16,11 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- DİNAMİK VE YORMAYAN ZİYARETÇİ SAYACI ---
+# --- ZİYARETÇİ SAYACI ---
 if "toplam_ziyaret" not in st.session_state:
   st.session_state.toplam_ziyaret = 0
   st.session_state.aktif_oturumlar = 1
 
-# Aynı oturumda sayfanın yenilenmesiyle sayacın durmaksızın artmasını önleyen akıllı bayrak
 if "ziyaret_sayildi" not in st.session_state:
   st.session_state.ziyaret_sayildi = True
   st.session_state.toplam_ziyaret += 1
@@ -108,7 +107,7 @@ with st.sidebar:
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v2")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -118,7 +117,7 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- GPS İLE OTOMATİK KONUM TESPİTİ ---
+# --- HIZLI VE GÜVENLİ GPS TESPİTİ ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
   st.info("💡 İpucu: Bulunduğunuz yerin anlık havasını tek tıkla görmek için sağdaki konumu al butonunu kullanabilirsiniz.")
@@ -126,17 +125,29 @@ with col_gps2:
   gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
 
 if gps_clicked:
+  # Daha kararlı ve hızlı tarayıcı konum yakalayıcısı
   loc_js = """
     <script>
-    navigator.geolocation.getCurrentPosition(function(position) {
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
-        window.parent.postMessage({type: 'streamlit:setComponentValue', value: {lat: lat, lon: lon}}, '*');
-    });
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const lat = position.coords.latitude;
+                const lon = position.coords.longitude;
+                // Streamlit bileşen iletişim kanalı
+                const data = {lat: lat, lon: lon};
+                window.parent.postMessage({type: 'streamlit:setComponentValue', value: data}, '*');
+            },
+            (error) => {
+                alert("GPS konum izni alınamadı veya zaman aşımına uğradı.");
+            },
+            { timeout: 10000, maximumAge: 0 }
+        );
+    } else {
+        alert("Tarayıcınız konum tespiti desteklemiyor.");
+    }
     </script>
     """
   components.html(loc_js, height=0)
-  st.success("GPS sinyali tarandı! Konum güncelleniyor...")
 
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
@@ -154,14 +165,14 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
 
   if rota_sorgula and baslangic_yer and bitis_yer:
     try:
-      loc_b = geolocator.geocode(baslangic_yer)
-      loc_v = geolocator.geocode(bitis_yer)
+      loc_b = geolocator.geocode(baslangic_yer, timeout=5)
+      loc_v = geolocator.geocode(bitis_yer, timeout=5)
       if loc_b and loc_v:
         url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
         url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
         
-        res_b = requests.get(url_b).json().get("current", {})
-        res_v = requests.get(url_v).json().get("current", {})
+        res_b = requests.get(url_b, timeout=5).json().get("current", {})
+        res_v = requests.get(url_v, timeout=5).json().get("current", {})
 
         st.markdown("---")
         st.subheader(f"🗺️ Güzergah Analiz Özeti: {baslangic_yer} ➡️ {bitis_yer}")
@@ -201,17 +212,19 @@ with col2:
 
 if search_button and search_query:
   try:
-    location = geolocator.geocode(search_query)
-    if location:
-      st.session_state.lat = location.latitude
-      st.session_state.lon = location.longitude
-      st.session_state.zoom = 12
-      st.session_state.son_arama = search_query
-      st.success(f"Bulunan Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
-    else:
-      st.error("Aradığınız konum bulunamadı.")
+    with st.spinner("Konum aranıyor..."):
+      location = geolocator.geocode(search_query, timeout=5)
+      if location:
+        st.session_state.lat = location.latitude
+        st.session_state.lon = location.longitude
+        st.session_state.zoom = 12
+        st.session_state.son_arama = search_query
+        st.success(f"Bulunan Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
+        st.rerun()
+      else:
+        st.error("Aradığınız konum bulunamadı. Lütfen daha net bir şehir veya ilçe adı yazın.")
   except Exception as e:
-    st.error(f"Arama hatası: {e}")
+    st.error(f"Arama sunucusuna bağlanırken hata oluştu: {e}")
 
 # --- HARİTA VE KATMANLAR ---
 m = folium.Map(
@@ -293,7 +306,7 @@ if st.session_state.lat and st.session_state.lon:
   st.markdown("---")
   st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
-  with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz yapılıyor..."):
+  with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz çekiliyor..."):
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
@@ -309,10 +322,15 @@ if st.session_state.lat and st.session_state.lon:
         f"&start_date={start_date}&end_date={today}&hourly=temperature_2m,precipitation"
     )
 
-    f_response = requests.get(forecast_url)
-    a_response = requests.get(archive_url)
+    try:
+      f_response = requests.get(forecast_url, timeout=10)
+      a_response = requests.get(archive_url, timeout=10)
+    except Exception as e:
+      f_response = None
+      a_response = None
+      st.error(f"Open-Meteo API sunucusuna bağlanırken ağ hatası oluştu: {e}")
 
-    if f_response.status_code == 200:
+    if f_response and f_response.status_code == 200:
       f_data = f_response.json()
       hourly_data = f_data.get("hourly", {})
       df = pd.DataFrame(hourly_data)
@@ -320,7 +338,7 @@ if st.session_state.lat and st.session_state.lon:
       csv_data = df.to_csv(index=False).encode("utf-8")
 
       df_archive = pd.DataFrame()
-      if a_response.status_code == 200:
+      if a_response and a_response.status_code == 200:
         a_data = a_response.json()
         df_archive = pd.DataFrame(a_data.get("hourly", {}))
         if not df_archive.empty:
@@ -512,4 +530,4 @@ if st.session_state.lat and st.session_state.lon:
         st.dataframe(df, use_container_width=True)
 
     else:
-      st.error("Veri çekilirken bir hata oluştu.")
+      st.error("Veriler API sunucusundan alınamadı. Lütfen internet bağlantınızı kontrol edin veya farklı bir konum aratın.")
