@@ -7,7 +7,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
-import streamlit.components.v1 as components
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -114,27 +113,6 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- GPS İLE OTOMATİK KONUM TESPİTİ ---
-col_gps1, col_gps2 = st.columns([4, 1])
-with col_gps1:
-  st.info("💡 İpucu: Bulunduğunuz yerin anlık havasını tek tıkla görmek için sağdaki konumu al butonunu kullanabilirsiniz.")
-with col_gps2:
-  gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
-
-if gps_clicked:
-  loc_js = """
-    <script>
-    navigator.geolocation.getCurrentPosition(function(position) {
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
-        window.parent.postMessage({type: 'streamlit:setComponentValue', value: {lat: lat, lon: lon}}, '*');
-    });
-    </script>
-    """
-  components.html(loc_js, height=0)
-  st.success("GPS sinyali tarandı! Konum güncelleniyor...")
-
-
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
 with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded=False):
   st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün.")
@@ -150,14 +128,14 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
 
   if rota_sorgula and baslangic_yer and bitis_yer:
     try:
-      loc_b = geolocator.geocode(baslangic_yer)
-      loc_v = geolocator.geocode(bitis_yer)
+      loc_b = geolocator.geocode(baslangic_yer, timeout=5)
+      loc_v = geolocator.geocode(bitis_yer, timeout=5)
       if loc_b and loc_v:
-        url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}&current=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}&current=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+        url_b = f"https://api.open-meteo.com/v1/forecast?latitude={loc_b.latitude}&longitude={loc_b.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+        url_v = f"https://api.open-meteo.com/v1/forecast?latitude={loc_v.latitude}&longitude={loc_v.longitude}¤t=temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
         
-        res_b = requests.get(url_b).json().get("current", {})
-        res_v = requests.get(url_v).json().get("current", {})
+        res_b = requests.get(url_b, timeout=5).json().get("current", {})
+        res_v = requests.get(url_v, timeout=5).json().get("current", {})
 
         st.markdown("---")
         st.subheader(f"🗺️ Güzergah Analiz Özeti: {baslangic_yer} ➡️ {bitis_yer}")
@@ -197,7 +175,7 @@ with col2:
 
 if search_button and search_query:
   try:
-    location = geolocator.geocode(search_query)
+    location = geolocator.geocode(search_query, timeout=5)
     if location:
       st.session_state.lat = location.latitude
       st.session_state.lon = location.longitude
@@ -224,15 +202,6 @@ radar_layer = TileLayer(
     opacity=0.6,
 )
 radar_layer.add_to(m)
-
-dark_layer = TileLayer(
-    tiles="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    attr="CartoDB Dark",
-    name="Karanlık Mod Harita",
-    overlay=True,
-    opacity=0.8,
-)
-dark_layer.add_to(m)
 
 Draw(
     export=False,
@@ -291,7 +260,7 @@ if st.session_state.lat and st.session_state.lon:
 
   with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz yapılıyor..."):
     forecast_url = (
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}&current="
+        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
         "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
@@ -305,10 +274,15 @@ if st.session_state.lat and st.session_state.lon:
         f"&start_date={start_date}&end_date={today}&hourly=temperature_2m,precipitation"
     )
 
-    f_response = requests.get(forecast_url)
-    a_response = requests.get(archive_url)
+    try:
+      f_response = requests.get(forecast_url, timeout=10)
+      a_response = requests.get(archive_url, timeout=10)
+    except Exception as e:
+      f_response = None
+      a_response = None
+      st.error(f"Bağlantı zaman aşımına uğradı veya ağ hatası oluştu: {e}")
 
-    if f_response.status_code == 200:
+    if f_response and f_response.status_code == 200:
       f_data = f_response.json()
       hourly_data = f_data.get("hourly", {})
       df = pd.DataFrame(hourly_data)
@@ -316,7 +290,7 @@ if st.session_state.lat and st.session_state.lon:
       csv_data = df.to_csv(index=False).encode("utf-8")
 
       df_archive = pd.DataFrame()
-      if a_response.status_code == 200:
+      if a_response and a_response.status_code == 200:
         a_data = a_response.json()
         df_archive = pd.DataFrame(a_data.get("hourly", {}))
         if not df_archive.empty:
@@ -343,9 +317,8 @@ if st.session_state.lat and st.session_state.lon:
       # --- YENİ ÖZELLİK: 3 GÜNÜ ORTALAMA DEĞİL, GÜN GÜN (TARİH TARİH) GÖSTERME ---
       st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
       if not df_3days.empty:
-        # Tarih sütunu ekle
         df_3days["date"] = df_3days["time"].dt.date
-        unique_dates = df_3days["date"].unique()[:3] # İlk 3 gün
+        unique_dates = df_3days["date"].unique()[:3]
 
         cols_day = st.columns(len(unique_dates) if len(unique_dates) > 0 else 1)
         
@@ -358,7 +331,6 @@ if st.session_state.lat and st.session_state.lon:
           d_snow = day_df["snowfall"].sum() if "snowfall" in day_df.columns else 0
           d_wind = day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else 0
 
-          # Gün adını Türkçe bulma
           gun_ismi = pd.to_datetime(d).strftime('%A')
           gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
 
@@ -434,7 +406,6 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab3:
         st.subheader("📄 Otomatik Meteorolojik Durum Raporu")
-        # Rapor için genel ortalama değerler
         t_all = [c for c in df_3days.columns if "temperature_2m" in c]
         rep_min = df_3days[t_all].min().min() if t_all else 0
         rep_max = df_3days[t_all].max().max() if t_all else 0
@@ -511,4 +482,4 @@ if st.session_state.lat and st.session_state.lon:
         st.dataframe(df, use_container_width=True)
 
     else:
-      st.error("Veri çekilirken bir hata oluştu.")
+      st.error(f"Veri çekilirken bir hata oluştu. HTTP Kodu: {f_response.status_code if f_response else 'Yanıt Yok'}")
