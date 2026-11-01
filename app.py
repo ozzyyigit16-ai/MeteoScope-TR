@@ -105,9 +105,9 @@ with st.sidebar:
 
 # --- ANA UYGULAMA ---
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
-st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
+st.markdown("Mahalle veya ilçe düzeyinde hassas arama yapabilir, haritadan nokta seçebilir ya da **Yüksek Hassasiyetli GPS** kullanabilirsiniz.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v6")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert_v7")
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -117,17 +117,18 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 
 
-# --- GPS KÖPRÜSÜ ---
+# --- MAHALLE / SOKAK DÜZEYİNDE YÜKSEK HASSASİYETLİ GPS MODülü ---
 col_gps1, col_gps2 = st.columns([4, 1])
 with col_gps1:
-  st.info("💡 İpucu: Tarayıcınızın konum iznini onaylayarak bulunduğunuz yeri tek tıkla haritaya işleyin.")
+  st.info("🎯 **Hassas Konum:** Tarayıcınızın GPS çipi üzerinden mahalle ve sokak düzeyinde tam koordinat almak için butonu kullanın.")
 with col_gps2:
-  gps_clicked = st.button("📍 Konumumu Bul", use_container_width=True)
+  gps_clicked = st.button("📍 Nokta Atışı Konum", use_container_width=True)
 
 if gps_clicked:
-  gps_bridge_code = """
-    <div style="font-family:sans-serif; padding:10px; background:#eef2f7; border-radius:8px; text-align:center;">
-        <p id="gps-status" style="margin:0; font-weight:bold; color:#333;">GPS Uyduları taranıyor, lütfen tarayıcı iznini onaylayın...</p>
+  # En yüksek hassasiyet modunu (enableHighAccuracy: true) zorlayan JS betiği
+  precise_gps_js = """
+    <div style="font-family:sans-serif; padding:10px; background:#e0f2fe; border-radius:8px; text-align:center; border: 1px solid #bae6fd;">
+        <p id="gps-status" style="margin:0; font-weight:bold; color:#0369a1;">📡 Yüksek hassasiyetli uydu ve Wi-Fi triangülasyonu yapılıyor...</p>
     </div>
     <script>
     if (navigator.geolocation) {
@@ -135,27 +136,31 @@ if gps_clicked:
             (position) => {
                 const lat = position.coords.latitude;
                 const lon = position.coords.longitude;
-                document.getElementById('gps-status').innerHTML = "✅ Konum başarıyla bulundu! Yükleniyor...";
-                document.getElementById('gps-status').style.color = "green";
+                const accuracy = position.coords.accuracy;
+                
+                document.getElementById('gps-status').innerHTML = "✅ Hassas konum alındı (Hata payı: ~" + Math.round(accuracy) + "m). Harita güncelleniyor...";
+                document.getElementById('gps-status').style.color = "#15803d";
+                
                 const streamlitData = {lat: lat, lon: lon};
                 window.parent.postMessage({type: 'streamlit:setComponentValue', value: streamlitData}, '*');
             },
             (error) => {
                 let errMessage = "Konum alınamadı.";
-                if(error.code == 1) errMessage = "Konum izni reddedildi.";
-                else if(error.code == 2) errMessage = "Konum bilgisine ulaşılamıyor.";
+                if(error.code == 1) errMessage = "Tarayıcı konum izni reddedildi.";
+                else if(error.code == 2) errMessage = "Konum sinyali alınamıyor.";
                 else if(error.code == 3) errMessage = "GPS zaman aşımına uğradı.";
+                
                 document.getElementById('gps-status').innerHTML = "❌ " + errMessage;
-                document.getElementById('gps-status').style.color = "red";
+                document.getElementById('gps-status').style.color = "#b91c1c";
             },
-            { timeout: 15000, enableHighAccuracy: true, maximumAge: 0 }
+            { timeout: 20000, enableHighAccuracy: true, maximumAge: 0 }
         );
     } else {
-        document.getElementById('gps-status').innerHTML = "❌ Tarayıcınız GPS desteklemiyor.";
+        document.getElementById('gps-status').innerHTML = "❌ Tarayıcınız hassas konumu desteklemiyor.";
     }
     </script>
     """
-  components.html(gps_bridge_code, height=60)
+  components.html(precise_gps_js, height=65)
 
 
 # --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
@@ -163,9 +168,9 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
   st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün.")
   col_g1, col_g2, col_g3 = st.columns([2, 2, 1])
   with col_g1:
-    baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: İstanbul", key="bas_yer")
+    baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: Maslak, İstanbul", key="bas_yer")
   with col_g2:
-    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Bursa", key="bit_yer")
+    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Nilüfer, Bursa", key="bit_yer")
   with col_g3:
     st.write("")
     st.write("")
@@ -212,7 +217,7 @@ st.markdown("---")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-  search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Ankara, Bursa, Paris veya Kadıköy", key="main_search")
+  search_query = st.text_input("🔍 Mahalle / İlçe / Şehir Ara", placeholder="Örn: Ayazağa Mah. İstanbul, Nilüfer Bursa veya Kadıköy", key="main_search")
 with col2:
   st.write("")
   st.write("")
@@ -220,28 +225,27 @@ with col2:
 
 if search_button and search_query:
   try:
-    with st.spinner("Konum aranıyor..."):
+    with st.spinner("Hassas konum aranıyor..."):
       location = geolocator.geocode(search_query, timeout=5)
       if location:
         st.session_state.lat = location.latitude
         st.session_state.lon = location.longitude
-        st.session_state.zoom = 12
+        st.session_state.zoom = 14  # Mahalle düzeyini net görmek için zoom artırıldı
         st.session_state.son_arama = search_query
-        st.success(f"Bulunan Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
+        st.success(f"Nokta Atışı Konum: {location.address} (Enlem: {location.latitude:.4f}, Boylam: {location.longitude:.4f})")
         st.rerun()
       else:
-        st.error("Aradığınız konum bulunamadı. Lütfen daha net bir şehir veya ilçe adı yazın.")
+        st.error("Aradığınız mahalle/ilçe bulunamadı. Lütfen 'Mahalle adı, İlçe/Şehir' şeklinde yazın.")
   except Exception as e:
     st.error(f"Arama sunucusuna bağlanırken hata oluştu: {e}")
 
-# --- HARİTA VE TEMİZ KATMANLAR (HATALI DARK_LAYER KALDIRILDI) ---
+# --- HARİTA VE TEMİZ KATMANLAR ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
     tiles="OpenStreetMap",
 )
 
-# Sadece sorunsuz çalışan Canlı Yağış Radarı bırakıldı
 radar_layer = TileLayer(
     tiles="https://tile.rainviewer.com/v2/radar/nowcast_120/{z}/{x}/{y}/2/1_1.png",
     attr="RainViewer",
@@ -265,15 +269,15 @@ Draw(
 
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
-    popup="Seçilen Konum",
-    tooltip="Aktif Konum",
+    popup="Seçilen Hassas Konum",
+    tooltip="Aktif Nokta",
     icon=folium.Icon(color="red", icon="cloud"),
 ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Çizim Aracı")
-st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya dilediğiniz noktaya tıklayabilirsiniz.")
+st.info("Harita üzerinden dilediğiniz binaya, sokağa veya mahalleye tıklayarak o noktaya ait verileri anında çekebilirsiniz.")
 
 map_data = st_folium(m, width="100%", height=480)
 
@@ -304,9 +308,9 @@ def degrees_to_cardinal(deg):
 
 if st.session_state.lat and st.session_state.lon:
   st.markdown("---")
-  st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
+  st.success(f"Aktif Hassas Koordinat -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
-  with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz çekiliyor..."):
+  with st.spinner("Nokta atışı 3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz çekiliyor..."):
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
         "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
@@ -515,7 +519,7 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab7:
         st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
-        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
+        rain_snow_cols = [col for col in df.codes if "precipitation" in col or "snow" in col] if hasattr(df, 'codes') else [col for col in df.columns if "precipitation" in col or "snow" in col]
         if rain_snow_cols:
           st.line_chart(df.set_index("time")[rain_snow_cols])
 
