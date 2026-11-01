@@ -139,7 +139,7 @@ with col1:
 st.markdown("---")
 st.subheader("📋 Uzman Meteorolojik Rapor ve Tavsiyeler")
 
-# Örnek sıcaklık ve yağış değerleri (İleride API ile dinamik bağlanabilir)
+# Örnek sıcaklık ve yağış değerleri
 ornek_sicaklik = 14.5
 ornek_yagis = True
 
