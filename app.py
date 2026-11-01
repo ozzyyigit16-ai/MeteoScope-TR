@@ -29,39 +29,51 @@ ACTIVE_TIMEOUT_SECONDS = 45
 
 cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
 
-# Önce HTTP isteğiyle gelen cookie'yi oku. Bazı Streamlit oturumlarında
-# component üzerinden okuma gerekebildiğinden CookieManager.get() de yedektir.
+# ÖNEMLİ: CookieManager ilk çizimde varsayılan olarak {} döndürebilir.
+# Bu, tarayıcıda gerçekten cookie olmadığı anlamına gelmez. Önce ayrı bir
+# component çağrısının hazır olmasını bekliyoruz. Böylece var olan ziyaretçi
+# kimliği okunmadan yeni UUID üretip eski kimliğin üzerine yazmıyoruz.
 try:
-    cookie_visitor_id = st.context.cookies.get("meteo_visitor_id")
+    browser_cookies = cookie_manager.cookie_manager(
+        method="getAll",
+        key="meteo_visitor_cookie_readiness",
+        default=None,
+    )
 except Exception:
-    cookie_visitor_id = None
+    browser_cookies = None
 
-if not cookie_visitor_id:
-    try:
-        cookie_visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
-    except Exception:
-        cookie_visitor_id = None
+# İlk render'da None ise component'in tarayıcıdan cevabı gelene kadar sayaç
+# işlemlerini durdur. Component cevabı geldiğinde Streamlit yeniden çalışır.
+if browser_cookies is None:
+    st.stop()
+
+cookie_visitor_id = browser_cookies.get("meteo_visitor_id") if isinstance(browser_cookies, dict) else None
+
+# HTTP isteği cookie'si de yedek kaynak; component'ten okunan değer öncelikli.
+try:
+    request_cookie_id = st.context.cookies.get("meteo_visitor_id")
+except Exception:
+    request_cookie_id = None
+
+cookie_visitor_id = cookie_visitor_id or request_cookie_id
 
 if cookie_visitor_id:
     visitor_id = str(cookie_visitor_id)
     st.session_state["meteo_visitor_id"] = visitor_id
 else:
-    # CookieManager ilk render'da henüz hazır değilse aynı Streamlit oturumu
-    # boyunca UUID'yi session_state'te koru; cookie'yi kalıcı olarak yaz.
-    visitor_id = st.session_state.get("meteo_visitor_id")
-    if not visitor_id:
-        visitor_id = str(uuid.uuid4())
-        st.session_state["meteo_visitor_id"] = visitor_id
-    try:
-        cookie_manager.set(
-            cookie="meteo_visitor_id",
-            val=visitor_id,
-            path="/",
-            expires_at=datetime.now() + timedelta(days=3650),
-            same_site="lax",
-        )
-    except Exception:
-        pass
+    # Sadece tarayıcıdan cookie listesinin hazır olduğu ve gerçekten cookie
+    # bulunmadığı doğrulandıktan sonra yeni kimlik oluştur.
+    visitor_id = st.session_state.get("meteo_visitor_id") or str(uuid.uuid4())
+    st.session_state["meteo_visitor_id"] = visitor_id
+    cookie_manager.set(
+        cookie="meteo_visitor_id",
+        val=visitor_id,
+        path="/",
+        expires_at=datetime.now() + timedelta(days=3650),
+        same_site="lax",
+        secure=True,
+        key="meteo_visitor_id_set",
+    )
 
 
 def initialize_counter_db():
