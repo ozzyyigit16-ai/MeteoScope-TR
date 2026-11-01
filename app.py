@@ -11,6 +11,9 @@ import time
 import os
 import json
 import uuid
+import sqlite3
+from datetime import datetime, timedelta
+import extra_streamlit_components as stx
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -19,58 +22,101 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- SIFIRDAN BAŞLAYAN KESİN ÇÖZÜMLÜ SAYAC SİSTEMİ ---
-VISITOR_FILE = "unique_visitors.json"
-ACTIVE_FILE = "active_sessions.json"
+# --- KALICI VE DİNAMİK ZİYARET / AKTİF OTURUM SİSTEMİ ---
+# SQLite dosyası uygulamanın kalıcı diskinde tutulmalıdır.
+COUNTER_DB = "meteo_counters.db"
+ACTIVE_TIMEOUT_SECONDS = 45
 
-# Eğer ilk defa çalıştırıyorsan veya sıfırlamak istiyorsan dosyayı temiz tutuyoruz
-if "initialized_counter" not in st.session_state:
-  st.session_state.user_uuid = str(uuid.uuid4())
-  st.session_state.initialized_counter = True
+cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
+visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
 
-# Benzersiz Ziyaretçi (Unique Visitor) Takibi
-unique_visitors = []
-if os.path.exists(VISITOR_FILE):
-  try:
-    with open(VISITOR_FILE, "r") as f:
-      unique_visitors = json.load(f)
-  except:
-    unique_visitors = []
+# İlk ziyarette tarayıcıya kalıcı bir kimlik verilir.
+# Cookie sayesinde sayfa yenilense veya kullanıcı daha sonra geri dönse de
+# aynı tarayıcı aynı ziyaretçi olarak tanınır.
+if not visitor_id:
+    visitor_id = str(uuid.uuid4())
+    cookie_manager.set(
+        cookie="meteo_visitor_id",
+        val=visitor_id,
+        expires_at=datetime.now() + timedelta(days=3650),
+    )
 
-if st.session_state.user_uuid not in unique_visitors:
-  unique_visitors.append(st.session_state.user_uuid)
-  try:
-    with open(VISITOR_FILE, "w") as f:
-      json.dump(unique_visitors, f)
-  except:
-    pass
+def initialize_counter_db():
+    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS unique_visitors (
+                visitor_id TEXT PRIMARY KEY,
+                first_seen REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                visitor_id TEXT PRIMARY KEY,
+                last_seen REAL NOT NULL
+            )
+        """)
+        conn.commit()
 
-toplam_ziyaretci_sayisi = len(unique_visitors)
+def register_unique_visitor(current_visitor_id):
+    now = time.time()
+    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+        # Aynı tarayıcı daha önce kaydedildiyse toplam ziyaretçi artmaz.
+        conn.execute(
+            "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
+            (current_visitor_id, now),
+        )
+        conn.commit()
 
-# Anlık Aktif Oturum Takibi (Son 60 saniye içinde istek atanlar)
-now = time.time()
-active_sessions = {}
-if os.path.exists(ACTIVE_FILE):
-  try:
-    with open(ACTIVE_FILE, "r") as f:
-      active_sessions = json.load(f)
-  except:
-    active_sessions = {}
+def refresh_active_session(current_visitor_id):
+    now = time.time()
+    cutoff = now - ACTIVE_TIMEOUT_SECONDS
+    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+        # Zaman aşımına uğramış oturumlar aktif listeden çıkarılır.
+        conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
+        # Her heartbeat'te bu ziyaretçinin son görülme zamanı güncellenir.
+        conn.execute("""
+            INSERT INTO active_sessions (visitor_id, last_seen)
+            VALUES (?, ?)
+            ON CONFLICT(visitor_id) DO UPDATE SET last_seen = excluded.last_seen
+        """, (current_visitor_id, now))
+        conn.commit()
 
-# Zaman aşımına uğrayanları temizle
-active_sessions = {
-    uid: ts for uid, ts in active_sessions.items() if now - ts < 60
-}
-active_sessions[st.session_state.user_uuid] = now
+def read_counter_values():
+    now = time.time()
+    cutoff = now - ACTIVE_TIMEOUT_SECONDS
+    with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
+        total_visitors = conn.execute(
+            "SELECT COUNT(*) FROM unique_visitors"
+        ).fetchone()[0]
+        active_count = conn.execute(
+            "SELECT COUNT(*) FROM active_sessions WHERE last_seen >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+    return total_visitors, active_count
 
-try:
-  with open(ACTIVE_FILE, "w") as f:
-    json.dump(active_sessions, f)
-except:
-  pass
+initialize_counter_db()
+register_unique_visitor(visitor_id)
+refresh_active_session(visitor_id)
 
-anlik_aktif_oturum = len(active_sessions)
+# Bu fragment yönetici girişi gerektirmeden her ziyaretçi için çalışır.
+# Böylece normal kullanıcıların aktif oturumları da sayılır.
+@st.fragment(run_every="15s")
+def maintain_active_heartbeat(current_visitor_id):
+    refresh_active_session(current_visitor_id)
 
+maintain_active_heartbeat(visitor_id)
+
+@st.fragment(run_every="15s")
+def render_live_admin_metrics():
+    total_visitors, active_count = read_counter_values()
+    st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
+    st.metric(label="Toplam Uygulama Ziyareti", value=f"{total_visitors:,}")
+    st.metric(label="Anlık Aktif Oturum", value=active_count)
+    st.metric(
+        label="Son Aranan Konum",
+        value=st.session_state.get("son_arama", "İstanbul / Merkez"),
+    )
+    st.caption("Aktif oturumlar 45 saniye boyunca güncellenmezse pasif kabul edilir.")
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
 def giyim_onerisi_olustur(
@@ -138,10 +184,7 @@ with st.sidebar:
 
   if yonetici_sifre == "meteo2026":
     st.success("✅ Yönetici Modu Aktif")
-    st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
-    st.metric(label="Toplam Uygulama Ziyareti", value=f"{toplam_ziyaretci_sayisi:,}")
-    st.metric(label="Anlık Aktif Oturum", value=anlik_aktif_oturum)
-    st.metric(label="Son Aranan Konum", value=st.session_state.get("son_arama", "İstanbul / Merkez"))
+    render_live_admin_metrics()
     st.info("Bu dinamik veriler sadece senin yönetici panelinde görünür.")
   elif yonetici_sifre != "":
     st.error("Hatalı şifre.")
