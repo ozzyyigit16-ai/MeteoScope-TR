@@ -38,17 +38,23 @@ if not st.session_state.authenticated:
   st.stop()
 
 
-# --- GELİŞTİRİLMİŞ AKILLI GİYİM ÖNERİSİ FONKSİYONU ---
-def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, ortalama_yagis_ihtimali, max_ruzgar):
-  """Sıcaklık, yağış ve rüzgar hamlelerine göre
+# --- GELİŞTİRİLMİŞ AKILLI GİYİM VE KAR ÖNERİSİ FONKSİYONU ---
+def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, ortalama_yagis_ihtimali, max_ruzgar):
+  """Sıcaklık, yağış, kar, yağış olasılığı ve rüzgara göre
 
-  akıllı ve gerçekçi giyim önerisi üretir.
+  akıllı ve profesyonel giyim önerisi üretir.
   """
   if max_ruzgar > 45:
     return (
         "🌪️ **Giyim Önerisi:** Bölgede çok kuvvetli rüzgar ve fırtına hamleleri"
         " bekleniyor. Rüzgarı kesen montlar giymeniz ve dikkatli"
         " olmanız tavsiye edilir."
+    )
+  elif toplam_kar > 0.5 or ortalama_sicaklik <= 0:
+    return (
+        "❄️ **Giyim Önerisi:** Kar yağışı veya sıfırın altında sert soğuklar"
+        " hakim. Kalın kışlık mont, kar botu, atkı, bere ve eldivenlerinizi"
+        " mutlaka yanınıza alın."
     )
   elif toplam_yagis > 1.0 or ortalama_yagis_ihtimali > 50:
     return (
@@ -95,7 +101,7 @@ col1, col2 = st.columns([3, 1])
 with col1:
   search_query = st.text_input(
       "🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)",
-      placeholder="Örn: Sarıyer, İstanbul veya Erzurum",
+      placeholder="Örn: Moskova, Erzurum veya İstanbul",
   )
 
 with col2:
@@ -197,11 +203,12 @@ if st.session_state.lat and st.session_state.lon:
       f" Boylam: {st.session_state.lon:.4f}"
   )
 
-  with st.spinner("3'lü model verileri, hassas rüzgar ve yağış analizi yapılıyor..."):
+  with st.spinner("3'lü model verileri, kar, rüzgar ve yağış analizi yapılıyor..."):
+    # API sorgusuna snowfall ve snow_depth eklendi
     forecast_url = (
         f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}&current="
-        "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
-        "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,precipitation_probability,"
+        "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
+        "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
         "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
         "&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7"
     )
@@ -233,6 +240,7 @@ if st.session_state.lat and st.session_state.lon:
       current_data = f_data.get("current", {})
       current_wind = current_data.get("wind_speed_10m", 0.0) if current_data else 0.0
       current_gust = current_data.get("wind_gusts_10m", 0.0) if current_data else 0.0
+      current_snow = current_data.get("snowfall", 0.0) if current_data else 0.0
       next_24h_precip = (
           df["precipitation"].head(24).sum()
           if "precipitation" in df.columns
@@ -244,16 +252,13 @@ if st.session_state.lat and st.session_state.lon:
             "🚨 **FIRTINA UYARISI:** Anlık rüzgar hızı veya hamlesi kritik seviyede!"
             f" (Hız: {current_wind:.1f} km/s, Hamle: {current_gust:.1f} km/s)"
         )
-      elif next_24h_precip > 15:
-        st.warning(
-            "⚠️ **KUVVETLİ YAĞIŞ UYARISI:** Önümüzdeki 24 saat içinde yoğun yağış"
-            f" bekleniyor ({next_24h_precip:.2f} mm)."
-        )
+      elif current_snow > 0:
+        st.info(f"❄️ **KAR YAĞIŞI BİLGİSİ:** Bulunulan konumda anlık kar yağışı tespit edildi ({current_snow:.1f} cm).")
 
-      # 3 Günlük Dinamik Trend, Yağış ve Hassas Rüzgar Hesaplama
+      # 3 Günlük Dinamik Trend, Yağış, Kar ve Rüzgar Hesaplama
       st.markdown("### 📈 Önümüzdeki 3 Günlük Dinamik Trend Özeti")
       df_3days = df.head(72)
-      max_t, min_t, total_precip, avg_wind, max_gust_3d, avg_precip_prob = 0, 0, 0, 0, 0, 0
+      max_t, min_t, total_precip, total_snow, avg_wind, max_gust_3d, avg_precip_prob = 0, 0, 0, 0, 0, 0, 0
       if not df_3days.empty:
         temp_cols = [c for c in df_3days.columns if "temperature_2m" in c]
         max_t = df_3days[temp_cols].max().max()
@@ -261,6 +266,11 @@ if st.session_state.lat and st.session_state.lon:
         total_precip = (
             df_3days["precipitation"].sum()
             if "precipitation" in df.columns
+            else 0.0
+        )
+        total_snow = (
+            df_3days["snowfall"].sum()
+            if "snowfall" in df_3days.columns
             else 0.0
         )
         avg_wind = (
@@ -288,8 +298,8 @@ if st.session_state.lat and st.session_state.lon:
             )
           with col_s2:
             st.metric(
-                label="3 Günlük Toplam Yağış",
-                value=f"{total_precip:.2f} mm",
+                label="Toplam Yağış / Kar",
+                value=f"{total_precip:.1f} mm / {total_snow:.1f} cm",
             )
           with col_s3:
             st.metric(
@@ -343,7 +353,7 @@ if st.session_state.lat and st.session_state.lon:
           "🌡️ Sıcaklık & Nem",
           "💨 Hassas Rüzgar & Hamle",
           "☁️ Basınç & Bulut",
-          "🌧️ Yağış & Olasılık",
+          "❄️ Yağış, Kar & Olasılık",
           "📋 Ham Veri & İndirme",
       ])
 
@@ -376,7 +386,7 @@ if st.session_state.lat and st.session_state.lon:
 
         ortalama_sicaklik_degeri = (min_t + max_t) / 2 if "min_t" in locals() else 15.0
         giyim_tavsiyesi_metni = giyim_onerisi_olustur(
-            ortalama_sicaklik_degeri, total_precip, avg_precip_prob, max_gust_3d
+            ortalama_sicaklik_degeri, total_precip, total_snow, avg_precip_prob, max_gust_3d
         )
 
         report_text = f"""
@@ -388,16 +398,17 @@ if st.session_state.lat and st.session_state.lon:
         1. ANLIK DURUM ÖZETİ:
         - Sıcaklık: {current_data.get('temperature_2m', 0.0):.1f} °C (Hissedilen: {current_data.get('apparent_temperature', 0.0):.1f} °C)
         - Bağıl Nem: {current_data.get('relative_humidity_2m', 0.0):.1f} %
+        - Kar Yağışı (Anlık): {current_snow:.1f} cm
         - Rüzgar Hızı / Hamle: {current_wind:.1f} / {current_gust:.1f} km/s ({degrees_to_cardinal(current_data.get('wind_direction_10m', 0))})
         
-        2. 3 GÜNLÜK TAHMİN TRENDİ VE RÜZGAR/YAĞIŞ ANALİZİ:
+        2. 3 GÜNLÜK TAHMİN TRENDİ VE HAVA ANALİZİ:
         - Sıcaklık Aralığı: {min_t:.1f}°C ile {max_t:.1f}°C arası
-        - Toplam Yağış Beklentisi (72 Saat): {total_precip:.2f} mm
+        - Toplam Yağış / Kar Beklentisi (72 Saat): {total_precip:.1f} mm / {total_snow:.1f} cm
         - Ortalama Yağış Olasılığı: %{avg_precip_prob:.0f}
         - Ortalama Rüzgar Hızı / Max Hamle: {avg_wind:.1f} / {max_gust_3d:.1f} km/s
         
         3. AKILLI GİYİM VE PLANLAMA TAVSİYESİ:
-        {giyim_tavsiyesi_metni.replace('**', '').replace('🌪️ ', '').replace('🌧️ ', '').replace('🧥 ', '').replace('👕 ', '').replace('👔 ', '')}
+        {giyim_tavsiyesi_metni.replace('**', '').replace('❄️ ', '').replace('🌪️ ', '').replace('🌧️ ', '').replace('🧥 ', '').replace('👕 ', '').replace('👔 ', '')}
         
         4. MODEL KONSENSÜS DURUMU:
         - ECMWF, GFS ve ICON modelleri ortak analize alınmıştır.
@@ -432,7 +443,6 @@ if st.session_state.lat and st.session_state.lon:
         ]
         if wind_cols:
           st.line_chart(df.set_index("time")[wind_cols])
-          st.caption("Mavi/Çizgiler: Rüzgar hızı ve anlık rüzgar hamleleri (gusts) km/s cinsinden detaylı gösterilmektedir.")
 
         wind_dir_cols = [col for col in df.columns if "direction" in col]
         if wind_dir_cols:
@@ -448,10 +458,10 @@ if st.session_state.lat and st.session_state.lon:
           st.line_chart(df.set_index("time")[press_cols])
 
       with tab7:
-        st.subheader("Yağış Miktarı ve Yağış İhtimali (%)")
-        rain_cols = [col for col in df.columns if "precipitation" in col or "precipitation_probability" in col]
-        if rain_cols:
-          st.line_chart(df.set_index("time")[rain_cols])
+        st.subheader("Yağış, Kar Yağışı ve Yağış İhtimali (%)")
+        rain_snow_cols = [col for col in df.columns if "precipitation" in col or "snow" in col]
+        if rain_snow_cols:
+          st.line_chart(df.set_index("time")[rain_snow_cols])
 
       with tab8:
         st.subheader("Ham Veri Tablosu ve Dışa Aktarım")
