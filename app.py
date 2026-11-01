@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
+import time
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -258,15 +259,16 @@ if st.session_state.lat and st.session_state.lon:
   st.markdown("---")
   st.success(f"Aktif Analiz Alanı/Koordinatı -> Enlem: {st.session_state.lat:.4f}, Boylam: {st.session_state.lon:.4f}")
 
-  with st.spinner("3'lü model verileri, kar, rüzgar ve günlük kırılımlı analiz yapılıyor..."):
-    # Profesyonel çoklu model ve parametre seti kararlı hale getirildi
-    forecast_url = (
-        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t="
-        "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly="
-        "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,"
-        "wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover"
-        "&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7"
-    )
+  with st.spinner("Model verileri ve akıllı kademeli analiz yükleniyor..."):
+    # --- AKILLI KADEMELİ MODEL URL LİSTESİ (FALLBACK SİSTEMİ) ---
+    # 1. Önce 3'lü model kombinasyonunu dener (ECMWF, GFS, ICON)
+    # 2. Yoğunluktan patlarsa 2'li modele düşer (ECMWF, GFS)
+    # 3. Hala yanıt alamazsa en kararlı tekil model / seamless yapıya geçer
+    forecast_urls_to_try = [
+        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless,icon_seamless&forecast_days=7",
+        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&models=ecmwf_ifs,gfs_seamless&forecast_days=7",
+        f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,snowfall,snow_depth,precipitation_probability,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,cloud_cover&forecast_days=7"
+    ]
 
     today = date.today()
     start_date = today - timedelta(days=7)
@@ -275,13 +277,32 @@ if st.session_state.lat and st.session_state.lon:
         f"&start_date={start_date}&end_date={today}&hourly=temperature_2m,precipitation"
     )
 
-    try:
-      f_response = requests.get(forecast_url, timeout=15)
-      a_response = requests.get(archive_url, timeout=15)
-    except Exception as e:
-      f_response = None
-      a_response = None
-      st.error(f"Bağlantı zaman aşımına uğradı veya ağ hatası oluştu: {e}")
+    f_response = None
+    # Kademeli olarak modelleri dener, biri bile 200 dönerse hemen yakalar
+    for url in forecast_urls_to_try:
+      for attempt in range(2):
+        try:
+          res = requests.get(url, timeout=12)
+          if res.status_code == 200:
+            f_response = res
+            break
+          time.sleep(0.5)
+        except Exception:
+          time.sleep(0.5)
+      if f_response and f_response.status_code == 200:
+        break
+
+    # Arşiv isteği için de güvenli deneme
+    a_response = None
+    for attempt in range(2):
+      try:
+        res_a = requests.get(archive_url, timeout=12)
+        if res_a.status_code == 200:
+          a_response = res_a
+          break
+        time.sleep(0.5)
+      except Exception:
+        time.sleep(0.5)
 
     if f_response and f_response.status_code == 200:
       f_data = f_response.json()
@@ -374,28 +395,29 @@ if st.session_state.lat and st.session_state.lon:
 
       with tab1:
         st.subheader("🌐 Küresel Modeller Arası Karşılaştırma ve Konsensüs Analizi")
-        st.markdown("Aşağıdaki grafiklerde **ECMWF**, **GFS** ve **ICON** modellerinin aynı lokasyon için öngördüğü **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
+        st.markdown("Aşağıdaki grafiklerde **Sıcaklık**, **Rüzgar** ve **Yağış** trendleri karşılaştırılmaktadır.")
 
         st.write("**1. Sıcaklık Modelleri Karşılaştırması (°C):**")
         model_temp_cols = [c for c in df.columns if "temperature_2m" in c and "_" in c]
         if model_temp_cols:
           st.line_chart(df.set_index("time")[model_temp_cols])
         else:
-          st.info("Sıcaklık model sütunları yüklenemedi.")
+          # Eğer tek model düşerse genel sıcaklık grafiğini basar
+          st.line_chart(df.set_index("time")[["temperature_2m"]])
 
         st.write("**2. Rüzgar Hızı Modelleri Karşılaştırması (km/s):**")
         model_wind_cols = [c for c in df.columns if "wind_speed_10m" in c and "_" in c]
         if model_wind_cols:
           st.line_chart(df.set_index("time")[model_wind_cols])
         else:
-          st.info("Rüzgar model sütunları yüklenemedi.")
+          st.line_chart(df.set_index("time")[["wind_speed_10m"]])
 
         st.write("**3. Yağış Modelleri Karşılaştırması (mm):**")
         model_precip_cols = [c for c in df.columns if "precipitation" in c and "_" in c]
         if model_precip_cols:
           st.line_chart(df.set_index("time")[model_precip_cols])
         else:
-          st.info("Yağış model sütunları yüklenemedi.")
+          st.line_chart(df.set_index("time")[["precipitation"]])
 
       with tab2:
         st.subheader("Geçmiş 7 Günün Arşiv Verileri")
@@ -483,4 +505,4 @@ if st.session_state.lat and st.session_state.lon:
         st.dataframe(df, use_container_width=True)
 
     else:
-      st.error(f"Veriler API sunucusundan alınamadı. HTTP Durum Kodu: {f_response.status_code if f_response else 'Yanıt Yok'}")
+      st.error("Veriler API sunucusundan alınamadı. Lütfen internet bağlantınızı kontrol edin.")
