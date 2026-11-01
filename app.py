@@ -29,29 +29,33 @@ ACTIVE_TIMEOUT_SECONDS = 45
 
 cookie_manager = stx.CookieManager(key="meteo_cookie_manager")
 
-# CookieManager ilk render sırasında cookie değerini henüz okuyamamış olabilir.
-# Bu durumda her rerun'da yeni UUID üretmek yerine Streamlit oturumunda
-# geçici kimliği saklarız. Cookie yazıldıktan sonra aynı tarayıcıdaki tüm
-# sekmeler ortak meteo_visitor_id cookie'sini okur ve tek ziyaretçi sayılır.
-cookie_visitor_id = cookie_manager.get(cookie="meteo_visitor_id")
+# Ziyaretçi kimliğini mümkün olduğunca HTTP isteğiyle birlikte gelen
+# tarayıcı çerezinden oku. CookieManager.get() bileşeni ilk render'da henüz
+# hazır olmayabildiği için burada ona güvenmek, her yeni Streamlit oturumunda
+# yanlışlıkla yeni UUID üretilmesine yol açabiliyordu.
+try:
+    cookie_visitor_id = st.context.cookies.get("meteo_visitor_id")
+except Exception:
+    # Eski Streamlit sürümleri için geriye dönük uyumluluk.
+    cookie_visitor_id = None
 
 if cookie_visitor_id:
     visitor_id = str(cookie_visitor_id)
     st.session_state["meteo_visitor_id"] = visitor_id
 else:
+    # Aynı Streamlit oturumu içindeki rerun'larda kimliği koru.
     visitor_id = st.session_state.get("meteo_visitor_id")
     if not visitor_id:
         visitor_id = str(uuid.uuid4())
         st.session_state["meteo_visitor_id"] = visitor_id
-
-    # Cookie yoksa yalnızca bu oturum için üretilen sabit kimliği yaz.
-    # Cookie tarayıcı genelinde paylaşıldığından yeni sekmeler de aynı
-    # ziyaretçi kimliğini kullanır.
-    cookie_manager.set(
-        cookie="meteo_visitor_id",
-        val=visitor_id,
-        expires_at=datetime.now() + timedelta(days=3650),
-    )
+        # Yalnızca ilk kez kimlik oluşturulduğunda tarayıcı çerezine yaz.
+        cookie_manager.set(
+            cookie="meteo_visitor_id",
+            val=visitor_id,
+            path="/",
+            expires_at=datetime.now() + timedelta(days=3650),
+            same_site="lax",
+        )
 
 def initialize_counter_db():
     with sqlite3.connect(COUNTER_DB, timeout=10) as conn:
