@@ -158,14 +158,14 @@ def read_counter_values():
 @st.fragment(run_every="5s")
 def render_live_admin_metrics():
     total_visitors, active_count = read_counter_values()
-    st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
+    st.markdown("### 📊 Yönetici İstatistikleri")
     st.metric(label="Toplam Benzersiz Ziyaretçi", value=f"{total_visitors:,}")
     st.metric(label="Anlık Aktif Oturum", value=active_count)
     st.metric(
         label="Son Aranan Konum",
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
-    st.caption("Cihazlar ve tarayıcılar tekil sayılır. Sekme kapatıldığında veya sayfa terkedildiğinde aktif oturum otomatik olarak 0'a düşer.")
+    st.caption("Bu veriler sadece şifre bilen yöneticiler tarafından görülebilir.")
 
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
@@ -303,7 +303,7 @@ def fetch_turkey_wide_ews():
   return global_alerts
 
 
-# --- GİZLİ YÖNETİCİ PANELİ ---
+# --- GİZLİ YÖNETİCİ PANELİ (SADECE ŞİFRE İLE AÇILIR) ---
 with st.sidebar:
   st.image("https://images.unsplash.com/photo-1592210454359-9043f067919b?w=400&q=80", use_container_width=True)
   st.title("MeteoScope-TR")
@@ -314,11 +314,10 @@ with st.sidebar:
   if yonetici_sifre == "meteo2026":
     st.success("✅ Yönetici Modu Aktif")
     render_live_admin_metrics()
-    st.info("Bu dinamik veriler sadece senin yönetici panelinde görünür.")
   elif yonetici_sifre != "":
     st.error("Hatalı şifre.")
   else:
-    st.info("Canlı istatistikleri görmek için şifrenizi girin.")
+    st.info("Yönetici istatistiklerini görmek için şifrenizi girin.")
 
 
 # --- ANA UYGULAMA ---
@@ -351,7 +350,7 @@ if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
 
 
-# --- KULLANICI İSTEĞİYLE AÇILIP KAPANAN KALICI SEYAHAT RİSK ANALİZİ & ÖZEL HARİtASI ---
+# --- KULLANICI İSTEĞİYLE AÇILIP KAPANAN KALICI SEYAHAT RİSK ANALİZİ & ÖZEL HARİTASI ---
 seyahat_acik = st.toggle("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", value=False, help="İstediğiniz zaman açıp kendi isteğinizle kapatabileceğiniz kalıcı seyahat analiz panelidir.")
 
 if seyahat_acik:
@@ -500,7 +499,7 @@ if seyahat_acik:
     # --- SEYAHATE ÖZEL BAĞIMSIZ HARİTA RENDER ETME ---
     if st.session_state.get("route_map_data"):
       r_info = st.session_state.route_map_data
-      st.markdown(f"### 🗺️ Rota & Yol Üstü Risk Haritası ({r_info['bas_ad']} ➡️ {rinfo['bit_ad']})")
+      st.markdown(f"### 🗺️ Rota & Yol Üstü Risk Haritası ({r_info['bas_ad']} ➡️ {r_info['bit_ad']})")
       
       if r_info["durum"] == "kirmizi":
         st.error("🚨 **GÜZERGAH RİSK RAPORU:** Rota üzerinde tehlikeli meteorolojik parametreler tespit edildi! Haritadaki **kırmızı uyarı pinlerini** inceleyiniz.")
@@ -509,17 +508,14 @@ if seyahat_acik:
       else:
         st.success("✅ **GÜZERGAH TEMİZ:** Yol üstünde seyahatinizi olumsuz etkileyecek risk bulunmuyor.")
 
-      # Seyahate özel bağımsız folium haritası oluşturuluyor
       mid_lat = (r_info["lat_b"] + r_info["lat_v"]) / 2
       mid_lon = (r_info["lon_b"] + r_info["lon_v"]) / 2
       
       route_map = folium.Map(location=[mid_lat, mid_lon], zoom_start=7, tiles="OpenStreetMap")
       
-      # Rota çizgisi (Polyline) ekle
       poly_pts = [(m["lat"], m["lon"]) for m in r_info["markers"]]
       folium.PolyLine(poly_pts, color="blue", weight=4, opacity=0.8, tooltip=f"{r_info['bas_ad']} - {r_info['bit_ad']} Güzergahı").add_to(route_map)
 
-      # Noktaları ve uyarı notlarını ekle
       for m_item in r_info["markers"]:
         c_color = "red" if m_item["risk"] else "green"
         c_icon = "warning-sign" if m_item["risk"] else "ok-sign"
@@ -780,7 +776,7 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Seçimi")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya dilediğiniz noktaya tıklayarak hava analizi yapabilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v16")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v17")
 
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
