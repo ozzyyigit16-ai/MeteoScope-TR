@@ -13,6 +13,7 @@ import os
 import sqlite3
 import json
 import tempfile
+import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Sayfa Yapılandırması
@@ -256,6 +257,14 @@ TURKEY_REGIONAL_CENTERS = {
     "Güneydoğu Anadolu (Diyarbakır)": (37.9144, 40.2306),
 }
 
+def _safe_number(value, default=0.0):
+  try:
+    if value is None or pd.isna(value):
+      return float(default)
+    return float(value)
+  except (TypeError, ValueError):
+    return float(default)
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_turkey_wide_ews():
   global_alerts = []
@@ -376,15 +385,6 @@ def _open_meteo_get(url, params, timeout=20):
     reason = payload.get("reason") or payload.get("message") or response.text[:300]
     raise RuntimeError(f"Open-Meteo HTTP {response.status_code}: {reason}")
   return payload
-
-
-def _safe_number(value, default=0.0):
-  try:
-    if value is None or pd.isna(value):
-      return float(default)
-    return float(value)
-  except (TypeError, ValueError):
-    return float(default)
 
 
 def _get_cache_filepath(latitude, longitude):
@@ -737,7 +737,7 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Rota Risk İşaretleri")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya güzergahtaki riskli noktaları harita üzerinde inceleyebilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v10")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v11")
 
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
