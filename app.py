@@ -737,7 +737,7 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Rota Risk İşaretleri")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya güzergahtaki riskli noktaları harita üzerinde inceleyebilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v11")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v12")
 
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
@@ -939,7 +939,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         "💨 Hassas Rüzgar & Hamle",
         "☁️ Basınç & Bulut",
         "❄️ Yağış, Kar & Olasılık",
-        "📋 Ham Veri & İndirme",
+        "📋 7 Günlük Hava Özeti & İndirme",
     ])
 
     with tab1:
@@ -1025,7 +1025,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.line_chart(df.set_index("time")[temp_cols])
 
     with tab5:
-      st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) ve Yön Analizi")
+      st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) and Yön Analizi")
       wind_cols = [col for col in df.columns if "speed" in col or "gusts" in col]
       if wind_cols:
         st.line_chart(df.set_index("time")[wind_cols])
@@ -1043,14 +1043,44 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.line_chart(df.set_index("time")[rain_snow_cols])
 
     with tab8:
-      st.subheader("Ham Veri Tablosu ve Dışa Aktarım")
-      st.download_button(
-          label="📥 Tahmin Verilerini CSV Olarak İndir",
-          data=csv_data,
-          file_name=f"meteo_forecast_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.csv",
-          mime="text/csv",
-      )
-      st.dataframe(df, use_container_width=True)
+      st.subheader(f"📅 Seçilen Konum İçin 7 Günlük Özet Tablo ({st.session_state.get('location_label', 'Konum')})")
+      st.markdown("Karmaşık ham veriler yerine, seçtiğiniz konum için önümüzdeki 7 günün en önemli hava parametreleri sadeleştirilmiş olarak aşağıda listelenmiştir.")
+      
+      # 7 günlük temiz özet tablo üretimi
+      if not df.empty:
+        df["date_only"] = df["time"].dt.date
+        seven_days_summary = []
+        for d_val, group_df in list(df.groupby("date_only"))[:7]:
+          t_col_name = [c for c in group_df.columns if "temperature_2m" in c]
+          min_t = group_df[t_col_name].min().min() if t_col_name else 0
+          max_t = group_df[t_col_name].max().max() if t_col_name else 0
+          tot_p = group_df["precipitation"].sum() if "precipitation" in group_df.columns else 0
+          max_w = group_df["wind_speed_10m"].max() if "wind_speed_10m" in group_df.columns else 0
+          
+          gun_adi_en = pd.to_datetime(d_val).strftime('%A')
+          gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_adi_en, gun_adi_en)
+          
+          seven_days_summary.append({
+              "Tarih": str(d_val),
+              "Gün": gun_tr,
+              "En Düşük Sıcaklık (°C)": round(min_t, 1),
+              "En Yüksek Sıcaklık (°C)": round(max_t, 1),
+              "Toplam Yağış (mm)": round(tot_p, 1),
+              "Maksimum Rüzgar (km/s)": round(max_w, 1)
+          })
+        
+        summary_df = pd.DataFrame(seven_days_summary)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+      
+      st.markdown("---")
+      col_dl1, col_dl2 = st.columns([2, 2])
+      with col_dl1:
+        st.download_button(
+            label="📥 Tüm Detaylı Tahmin Verilerini İndir (CSV)",
+            data=csv_data,
+            file_name=f"meteo_forecast_lat_{st.session_state.lat:.2f}_lon_{st.session_state.lon:.2f}.csv",
+            mime="text/csv",
+        )
 
   else:
     st.error(f"Meteoroloji verileri alınamadı: {weather_error}")
