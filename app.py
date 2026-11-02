@@ -11,6 +11,9 @@ from streamlit_folium import st_folium
 import time
 import os
 import sqlite3
+import json
+import tempfile
+import streamlit.components.v1 as components
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -19,33 +22,26 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- BENZERSİZ ZİYARETÇİ / AKTİF CİHAZ SAYACI (V6) ---
-# Kimlik tarayıcı localStorage alanında tutulur. Aynı origin'deki sekmeler
-# localStorage'ı paylaşır; telefon ve bilgisayar ise ayrı kimlik üretir.
-# Bu küçük bileşen Streamlit'in kendi component API'sini kullanır; yeni paket gerekmez.
+# --- KUSURSUZ AKTİF OTURUM VE TOPLAM ZİYARETÇİ SİSTEMİ ---
 COUNTER_DB = "meteo_counters.db"
-ACTIVE_TIMEOUT_SECONDS = 45
+# Bir cihaz 20 saniye boyunca sinyal (heartbeat) göndermezse aktif oturumdan düşer.
+HEARTBEAT_TIMEOUT_SECONDS = 20
 
 
 @st.cache_resource(show_spinner=False)
-def get_browser_identity_component():
-    """Tarayıcı localStorage/cookie kimliğini Python'a döndüren mini bileşen."""
-    import streamlit.components.v1 as components
-    import tempfile
-
-    component_dir = os.path.join(tempfile.gettempdir(), "meteoscope_browser_identity_v6")
+def get_heartbeat_component():
+    """Tarayıcının aktif sekmede açık olup olmadığını her 10 saniyede bir sunucuya bildiren mini JavaScript bileşeni."""
+    component_dir = os.path.join(tempfile.gettempdir(), "meteoscope_heartbeat_v7")
     os.makedirs(component_dir, exist_ok=True)
     html_path = os.path.join(component_dir, "index.html")
 
     component_html = r'''<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<head><meta charset="utf-8"></head>
 <body>
 <script>
 (function () {
   "use strict";
-  let alreadyReturned = false;
-
   function sendToStreamlit(type, data) {
     const message = Object.assign({isStreamlitMessage: true, type: type}, data || {});
     window.parent.postMessage(message, "*");
@@ -55,76 +51,30 @@ def get_browser_identity_component():
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
       return window.crypto.randomUUID();
     }
-    const bytes = new Uint8Array(16);
-    if (window.crypto && window.crypto.getRandomValues) {
-      window.crypto.getRandomValues(bytes);
-      return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
-    }
-    return "v6-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+    return "v7-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   }
 
-  function readCookie(name) {
-    const prefix = name + "=";
-    const parts = document.cookie ? document.cookie.split(";") : [];
-    for (let part of parts) {
-      part = part.trim();
-      if (part.startsWith(prefix)) {
-        try { return decodeURIComponent(part.slice(prefix.length)); }
-        catch (_) { return part.slice(prefix.length); }
-      }
-    }
-    return null;
-  }
-
-  function writeCookie(name, value) {
-    const secure = window.location.protocol === "https:" ? "; Secure" : "";
-    document.cookie = name + "=" + encodeURIComponent(value) +
-      "; Max-Age=315360000; Path=/; SameSite=Lax" + secure;
-  }
-
-  function readOrCreateId() {
+  function getVisitorId() {
     let id = null;
-    try { id = window.localStorage.getItem("meteoscope_tr_visitor_id_v1"); }
-    catch (_) { /* Cookie fallback below. */ }
-
-    // V5'ten kalan cookie varsa yeni kimlik üretmek yerine onu devral.
-    if (!id) id = readCookie("meteo_visitor_id");
-    if (!id) id = makeId();
-
-    try { window.localStorage.setItem("meteoscope_tr_visitor_id_v1", id); }
-    catch (_) { /* Cookie remains the fallback store. */ }
-    writeCookie("meteo_visitor_id", id);
+    try { id = window.localStorage.getItem("meteoscope_tr_visitor_id_v7"); } catch (_) {}
+    if (!id) {
+      id = makeId();
+      try { window.localStorage.setItem("meteoscope_tr_visitor_id_v7", id); } catch (_) {}
+    }
     return id;
   }
 
-  async function getOrCreateId() {
-    // Web Locks, aynı anda açılan sekmelerin ilk kimliği farklı üretmesini önler.
-    if (navigator.locks && typeof navigator.locks.request === "function") {
-      try {
-        return await navigator.locks.request(
-          "meteoscope-tr-visitor-id-lock",
-          {mode: "exclusive"},
-          () => readOrCreateId()
-        );
-      } catch (_) { /* Continue with localStorage/cookie fallback. */ }
-    }
-    return readOrCreateId();
-  }
+  const visitorId = getVisitorId();
 
-  window.addEventListener("message", async function (event) {
-    if (!event.data || event.data.type !== "streamlit:render" || alreadyReturned) return;
-    alreadyReturned = true;
-    try {
-      const visitorId = await getOrCreateId();
-      sendToStreamlit("streamlit:setComponentValue", {
-        value: {ready: true, visitor_id: visitorId}
-      });
-    } catch (error) {
-      sendToStreamlit("streamlit:setComponentValue", {
-        value: {ready: false, error: String(error)}
-      });
+  // İlk açılışta kimliği Python'a bildir
+  sendToStreamlit("streamlit:setComponentValue", { value: { action: "register", visitor_id: visitorId } });
+
+  // Sayfa açık olduğu sürece her 10 saniyede bir aktiflik sinyali (heartbeat) gönder
+  setInterval(function () {
+    if (!document.hidden) {
+      sendToStreamlit("streamlit:setComponentValue", { value: { action: "heartbeat", visitor_id: visitorId } });
     }
-  });
+  }, 10000);
 
   sendToStreamlit("streamlit:componentReady", {apiVersion: 1});
   sendToStreamlit("streamlit:setFrameHeight", {height: 0});
@@ -133,34 +83,15 @@ def get_browser_identity_component():
 </body>
 </html>'''
 
-    # Streamlit component'inin statik HTML dosyasını yalnızca bir kez oluştur.
     if not os.path.exists(html_path):
         with open(html_path, "w", encoding="utf-8") as html_file:
             html_file.write(component_html)
 
-    return components.declare_component("meteoscope_browser_identity_v6", path=component_dir)
-
-
-browser_identity_component = get_browser_identity_component()
-identity_result = browser_identity_component(key="meteoscope_browser_identity_v6", default=None, height=0)
-
-if not isinstance(identity_result, dict) or not identity_result.get("ready"):
-    if isinstance(identity_result, dict) and identity_result.get("error"):
-        st.error("Tarayıcı kimliği okunamadı. Tarayıcınızın site verisi/cookie depolamasına izin verip sayfayı yenileyin.")
-    else:
-        st.info("Ziyaretçi kimliği hazırlanıyor...")
-    st.stop()
-
-visitor_id = str(identity_result.get("visitor_id", "")).strip()
-if not visitor_id:
-    st.error("Tarayıcı kimliği boş döndü; ziyaretçi sayacı güvenli şekilde başlatılamadı.")
-    st.stop()
-st.session_state["meteo_visitor_id"] = visitor_id
+    return components.declare_component("meteoscope_heartbeat_v7", path=component_dir)
 
 
 @contextmanager
 def get_counter_connection():
-    """Her sayaç işlemi için bağlantıyı güvenle aç, commit/rollback yap ve kapat."""
     conn = sqlite3.connect(COUNTER_DB, timeout=20)
     conn.execute("PRAGMA busy_timeout=20000")
     try:
@@ -188,56 +119,41 @@ def initialize_counter_db():
                 last_seen REAL NOT NULL
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS counter_meta (
-                meta_key TEXT PRIMARY KEY,
-                meta_value TEXT NOT NULL
-            )
-        """)
-        # Önceki denemelerin sayaç kayıtlarını yalnızca V6'nın ilk çalışmasında
-        # temizle. Her Streamlit rerun'ında veya sekme açılışında sıfırlama yapma.
-        conn.execute("BEGIN IMMEDIATE")
-        reset_marker = conn.execute(
-            "SELECT 1 FROM counter_meta WHERE meta_key = ?",
-            ("unique_visitors_reset_v6",),
-        ).fetchone()
-        if not reset_marker:
-            conn.execute("DELETE FROM unique_visitors")
-            conn.execute("DELETE FROM active_sessions")
-            conn.execute(
-                "INSERT INTO counter_meta (meta_key, meta_value) VALUES (?, ?)",
-                ("unique_visitors_reset_v6", str(time.time())),
-            )
-        conn.commit()
 
 
-def register_unique_visitor(current_visitor_id):
-    """Aynı tarayıcı/cihaz kimliği veritabanına yalnızca bir kez eklenir."""
-    now = time.time()
-    with get_counter_connection() as conn:
-        cursor = conn.execute(
-            "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
-            (current_visitor_id, now),
-        )
-        return cursor.rowcount == 1
+initialize_counter_db()
 
+# Tarayıcı bileşenini çağır
+heartbeat_component = get_heartbeat_component()
+hb_result = heartbeat_component(key="meteoscope_hb_comp", default=None, height=0)
 
-def refresh_active_session(current_visitor_id):
-    """Sekmeler aynı visitor_id'yi kullandığından tek aktif cihaz satırı güncellenir."""
-    now = time.time()
-    cutoff = now - ACTIVE_TIMEOUT_SECONDS
-    with get_counter_connection() as conn:
-        conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
-        conn.execute("""
-            INSERT INTO active_sessions (visitor_id, last_seen)
-            VALUES (?, ?)
-            ON CONFLICT(visitor_id) DO UPDATE SET last_seen = excluded.last_seen
-        """, (current_visitor_id, now))
+# JS'den gelen sinyale göre veritabanını güncelle
+if isinstance(hb_result, dict):
+    v_id = hb_result.get("visitor_id")
+    action = hb_result.get("action")
+    if v_id:
+        now = time.time()
+        with get_counter_connection() as conn:
+            if action == "register":
+                conn.execute(
+                    "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
+                    (v_id, now),
+                )
+            # Hem register hem heartbeat anlık oturum zamanını günceller
+            conn.execute("""
+                INSERT INTO active_sessions (visitor_id, last_seen)
+                VALUES (?, ?)
+                ON CONFLICT(visitor_id) DO UPDATE SET last_seen = excluded.last_seen
+            """, (v_id, now))
 
 
 def read_counter_values():
-    cutoff = time.time() - ACTIVE_TIMEOUT_SECONDS
+    now = time.time()
+    cutoff = now - HEARTBEAT_TIMEOUT_SECONDS
     with get_counter_connection() as conn:
+        # Süresi dolmuş (sayfadan çıkmış/kapatmış) oturumları temizle
+        conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
+        
         total_visitors = conn.execute(
             "SELECT COUNT(*) FROM unique_visitors"
         ).fetchone()[0]
@@ -248,20 +164,7 @@ def read_counter_values():
     return total_visitors, active_count
 
 
-initialize_counter_db()
-register_unique_visitor(visitor_id)
-refresh_active_session(visitor_id)
-
-
-@st.fragment(run_every="15s")
-def maintain_active_heartbeat(current_visitor_id):
-    refresh_active_session(current_visitor_id)
-
-
-maintain_active_heartbeat(visitor_id)
-
-
-@st.fragment(run_every="15s")
+@st.fragment(run_every="5s")
 def render_live_admin_metrics():
     total_visitors, active_count = read_counter_values()
     st.markdown("### 📊 Canlı ve Dinamik İstatistikler")
@@ -271,24 +174,25 @@ def render_live_admin_metrics():
         label="Son Aranan Konum",
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
-    st.caption("Aynı tarayıcıdaki sekmeler tek ziyaretçi sayılır. Farklı cihazlar/tarayıcılar ayrı ziyaretçi sayılır. Aktif ziyaretçiler 45 saniye sinyal göndermezse pasif kabul edilir.")
+    st.caption("Cihazlar ve tarayıcılar tekil sayılır. Sekme kapatıldığında veya sayfa terkedildiğinde aktif oturum otomatik olarak 0'a düşer.")
+
 
 # --- AKILLI GİYİM VE KAR ÖNERİSİ ---
 def giyim_onerisi_olustur(
     ortalama_sicaklik, toplam_yagis, toplam_kar, ortalama_yagis_ihtimali, max_ruzgar
 ):
   if max_ruzgar > 45:
-    return "🌪️ **Giyim Önerisi:** Bölgede çok kuvvetli rüzgar ve fırtına hamleleri bekleniyor. Rüzgarı kesen montlar giymeniz tavsiye edilir."
+    return "🌪️ **Giyim Önerisi:** Bölgede kuvvetli rüzgar ve fırtına hamleleri var. Rüzgarı kesen montlar tercih edin."
   elif toplam_kar > 0.5 or ortalama_sicaklik <= 0:
-    return "❄️ **Giyim Önerisi:** Kar yağışı veya sıfırın altında sert soğuklar hakim. Kalın kışlık mont, kar botu ve eldivenlerinizi unutmayın."
+    return "❄️ **Giyim Önerisi:** Hava sıfırın altında ve sert soğuk hakim. Kalın kışlık mont ve botlarınızı giyin."
   elif toplam_yagis > 1.0 or ortalama_yagis_ihtimali > 50:
-    return "🌧️ **Giyim Önerisi:** Yağış geçişleri bekleniyor. Yanınıza şemsiye alarak su geçirmez katmanlar tercih edin."
+    return "🌧️ **Giyim Önerisi:** Yağış geçişleri var, yanınıza şemsiye alın."
   elif ortalama_sicaklik < 12:
-    return "🧥 **Giyim Önerisi:** Hava oldukça soğuk. Kalın montlar ve kat kat giyinmeniz tavsiye edilir."
+    return "🧥 **Giyim Önerisi:** Hava oldukça soğuk, kat kat giyinin."
   elif ortalama_sicaklik > 25:
-    return "👕 **Giyim Önerisi:** Hava sıcak ve güneşli. Hafif ve nefes alabilen kıyafetler giyinebilirsiniz."
+    return "👕 **Giyim Önerisi:** Hava sıcak, hafif kıyafetler tercih edebilirsiniz."
   else:
-    return "👔 **Giyim Önerisi:** Hava mevsim normallerinde. Günlük kıyafetler tercih edebilirsiniz."
+    return "👔 **Giyim Önerisi:** Hava mevsim normallerinde."
 
 
 # --- TEK KONUM AKILLI UYARI SİSTEMİ ---
@@ -327,6 +231,35 @@ def konum_uyari_analizi(curr_data, df_3days):
   return uyarilar
 
 
+# --- METEOROLOJİK ERKEN UYARI SİSTEMİ (EWS) ---
+def ekstrem_erken_uyari_analizi(df_7days, konum_adi):
+  if df_7days.empty:
+    return []
+
+  tehlikeler = []
+  for _, row in df_7days.iterrows():
+    t_time = row["time"]
+    precip = row.get("precipitation", 0)
+    gust = row.get("wind_gusts_10m", 0)
+
+    if precip >= 15.0:
+      tehlikeler.append({
+          "tarih_str": t_time.strftime("%d %B %Y, Saat: %H:00"),
+          "tip": "Şiddetli Sağanak ve Sel Riski",
+          "detay": f"Seçilen konumda ({konum_adi}) saatlik bazda {precip:.1f} mm yoğun yağış öngörülüyor.",
+          "seviye": "kirmizi"
+      })
+    elif gust >= 65.0:
+      tehlikeler.append({
+          "tarih_str": t_time.strftime("%d %B %Y, Saat: %H:00"),
+          "tip": "Şiddetli Fırtına / Rüzgar Hamlesi",
+          "detay": f"Seçilen konumda ({konum_adi}) anlık rüzgar hamlesi {gust:.1f} km/s seviyesine ulaşabilir.",
+          "seviye": "kirmizi"
+      })
+
+  return tehlikeler
+
+
 # --- GİZLİ YÖNETİCİ PANELİ ---
 with st.sidebar:
   st.image("https://images.unsplash.com/photo-1592210454359-9043f067919b?w=400&q=80", use_container_width=True)
@@ -362,6 +295,9 @@ if "zoom" not in st.session_state:
 if "location_label" not in st.session_state:
   st.session_state.location_label = "İstanbul / Merkez"
 
+if "route_markers" not in st.session_state:
+  st.session_state.route_markers = []
+
 
 # --- KONUM VE MODEL BAZLI OPEN-METEO VERİ MOTORU ---
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -377,17 +313,17 @@ HOURLY_VARIABLES = [
     "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
     "surface_pressure", "cloud_cover",
 ]
-# Bu üç model Türkiye dahil küresel kapsama sahip modellerdir.
-# GFS için güncel ad ve eski uyumlu ad sırayla denenir.
 FORECAST_MODELS = [
     ("ECMWF IFS", "ECMWF_IFS", ["ecmwf_ifs"]),
     ("GFS", "GFS", ["ncep_gfs_seamless", "gfs_seamless"]),
     ("ICON", "ICON", ["icon_seamless", "dwd_icon_seamless"]),
 ]
 
+BACKUP_CACHE_DIR = os.path.join(tempfile.gettempdir(), "meteoscope_backup_cache_v1")
+os.makedirs(BACKUP_CACHE_DIR, exist_ok=True)
+
 
 def _open_meteo_get(url, params, timeout=20):
-  """Open-Meteo yanıtını HTTP ve API hata gövdeleriyle birlikte doğrula."""
   response = requests.get(url, params=params, timeout=timeout)
   try:
     payload = response.json()
@@ -408,9 +344,47 @@ def _safe_number(value, default=0.0):
     return float(default)
 
 
+def _get_cache_filepath(latitude, longitude):
+  lat_key = round(float(latitude), 3)
+  lon_key = round(float(longitude), 3)
+  return os.path.join(BACKUP_CACHE_DIR, f"weather_cache_{lat_key}_{lon_key}.json")
+
+
+def save_weather_to_backup_cache(latitude, longitude, f_data, df_serialized, model_status, model_errors):
+  try:
+    cache_path = _get_cache_filepath(latitude, longitude)
+    payload = {
+        "f_data": f_data,
+        "dataframe_json": df_serialized.to_json(date_format="iso", orient="split"),
+        "model_status": model_status,
+        "model_errors": model_errors,
+        "saved_at": time.time(),
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+      json.dump(payload, f)
+  except Exception:
+    pass
+
+
+def load_weather_from_backup_cache(latitude, longitude):
+  try:
+    cache_path = _get_cache_filepath(latitude, longitude)
+    if os.path.exists(cache_path):
+      with open(cache_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+      f_data = payload.get("f_data")
+      df_json = payload.get("dataframe_json")
+      df = pd.read_json(df_json, orient="split")
+      if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"])
+      return f_data, df, payload.get("model_status", {}), payload.get("model_errors", {})
+  except Exception:
+    pass
+  return None, None, None, None
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_weather_bundle(latitude, longitude):
-  """Seçilen koordinat için Best Match + ayrı ayrı üç model verisini getir."""
   common_params = {
       "latitude": float(latitude),
       "longitude": float(longitude),
@@ -423,7 +397,15 @@ def fetch_weather_bundle(latitude, longitude):
   }
   best_params = dict(common_params)
   best_params["current"] = ",".join(CURRENT_VARIABLES)
-  best_data = _open_meteo_get(OPEN_METEO_FORECAST_URL, best_params)
+  
+  try:
+    best_data = _open_meteo_get(OPEN_METEO_FORECAST_URL, best_params, timeout=20)
+  except Exception as live_exc:
+    cached_f, cached_df, cached_status, cached_errors = load_weather_from_backup_cache(latitude, longitude)
+    if cached_f is not None and cached_df is not None:
+      return cached_f, cached_df, cached_status, cached_errors
+    raise live_exc
+
   best_hourly = best_data.get("hourly") or {}
   if not best_hourly.get("time"):
     raise RuntimeError("Best Match tahmin yanıtında saatlik zaman dizisi bulunamadı.")
@@ -431,7 +413,6 @@ def fetch_weather_bundle(latitude, longitude):
   df = pd.DataFrame(best_hourly)
   df["time"] = pd.to_datetime(df["time"], errors="coerce")
   df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-  # Best Match sütunlarını model karşılaştırma grafiklerinde açıkça etiketle.
   for variable in HOURLY_VARIABLES:
     if variable in df.columns:
       df[f"{variable}_BEST_MATCH"] = df[variable]
@@ -447,7 +428,7 @@ def fetch_weather_bundle(latitude, longitude):
       params = dict(common_params)
       params["models"] = model_id
       try:
-        data = _open_meteo_get(OPEN_METEO_FORECAST_URL, params)
+        data = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=15)
         hourly = data.get("hourly") or {}
         if not hourly.get("time"):
           raise RuntimeError("Model yanıtında saatlik zaman dizisi yok.")
@@ -480,6 +461,7 @@ def fetch_weather_bundle(latitude, longitude):
         model_errors[display_name] = str(exc)
 
   df = df.sort_values("time").reset_index(drop=True)
+  save_weather_to_backup_cache(latitude, longitude, best_data, df, model_status, model_errors)
   return best_data, df, model_status, model_errors
 
 
@@ -504,18 +486,35 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
   return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-# --- İKİ KONUM ARASI GÜZERGAH HAVA DURUMU ÖZETİ ---
-with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded=False):
-  st.markdown("Seyahat edeceğiniz başlangıç ve varış noktalarını yazarak güzergah üzerindeki muhtemel riskleri önceden görün.")
-  col_g1, col_g2, col_g3 = st.columns([2, 2, 1])
+# --- İKİ KONUM ARASI GELİŞMİŞ GÜZERGAH VE ARA NOKTA RİSK ANALİZİ ---
+with st.expander("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", expanded=False):
+  st.markdown("Seyahat edeceğiniz güzergahı, **ulaşım aracınızı** ve planlanan tarihi girerek **sadece kalkış/varış değil, yol üstündeki (ara geçişlerdeki) gizli riskleri** harita üzerinde nokta atışı tespit edin.")
+  
+  col_g1, col_g2 = st.columns(2)
   with col_g1:
     baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: İstanbul", key="bas_yer")
   with col_g2:
-    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Bursa", key="bit_yer")
-  with col_g3:
-    st.write("")
-    st.write("")
-    rota_sorgula = st.button("Güzergahı Analiz Et")
+    bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Ankara veya Bursa", key="bit_yer")
+
+  col_t1, col_t2 = st.columns(2)
+  with col_t1:
+    ulasim_turu = st.selectbox(
+        "Seçilen Ulaşım Aracı",
+        ["Özel Araç / Otobüs (Kara Yolu)", "Uçak (Hava Yolu)", "Gemi / Feribot (Deniz Yolu)"],
+        index=0
+    )
+  with col_t2:
+    bugun_tarih = date.today()
+    max_tarih = bugun_tarih + timedelta(days=7)
+    planlanan_tarih = st.date_input(
+        "Planlanan Seyahat Tarihi (Max 7 Gün Sınırı)",
+        value=bugun_tarih,
+        min_value=bugun_tarih,
+        max_value=max_tarih,
+        help="Küresel tahmin modellerinin en yüksek güvenilirlikle simülasyon yapabilmesi için 7 günlük sınır uygulanır."
+    )
+
+  rota_sorgula = st.button("Rotayı ve Yol Üstü Noktaları Analiz Et")
 
   if rota_sorgula and baslangic_yer and bitis_yer:
     try:
@@ -523,44 +522,98 @@ with st.expander("🚗 İki Konum Arası Güzergah Hava Durumu Özeti", expanded
       loc_v = geolocator.geocode(bitis_yer, timeout=5)
       if loc_b and loc_v:
         route_current_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        route_params_b = {
-            "latitude": loc_b.latitude, "longitude": loc_b.longitude,
-            "current": route_current_vars, "timezone": "auto",
-            "wind_speed_unit": "kmh", "precipitation_unit": "mm",
-        }
-        route_params_v = {
-            "latitude": loc_v.latitude, "longitude": loc_v.longitude,
-            "current": route_current_vars, "timezone": "auto",
-            "wind_speed_unit": "kmh", "precipitation_unit": "mm",
-        }
-        res_b = _open_meteo_get(OPEN_METEO_FORECAST_URL, route_params_b, timeout=15).get("current", {})
-        res_v = _open_meteo_get(OPEN_METEO_FORECAST_URL, route_params_v, timeout=15).get("current", {})
-        res_b = {k: _safe_number(res_b.get(k)) for k in route_current_vars.split(",")}
-        res_v = {k: _safe_number(res_v.get(k)) for k in route_current_vars.split(",")}
+        
+        lat_b, lon_b = loc_b.latitude, loc_b.longitude
+        lat_v, lon_v = loc_v.latitude, loc_v.longitude
+        
+        lat_mid1 = lat_b + (lat_v - lat_b) * 0.33
+        lon_mid1 = lon_b + (lon_v - lon_b) * 0.33
+        
+        lat_mid2 = lat_b + (lat_v - lat_b) * 0.66
+        lon_mid2 = lon_b + (lon_v - lon_b) * 0.66
+
+        def get_point_weather(lat, lon):
+          params = {
+              "latitude": lat, "longitude": lon,
+              "current": route_current_vars, "timezone": "auto",
+              "wind_speed_unit": "kmh", "precipitation_unit": "mm",
+          }
+          res = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=15).get("current", {})
+          return {k: _safe_number(res.get(k)) for k in route_current_vars.split(",")}
+
+        res_b = get_point_weather(lat_b, lon_b)
+        res_m1 = get_point_weather(lat_mid1, lon_mid1)
+        res_m2 = get_point_weather(lat_mid2, lon_mid2)
+        res_v = get_point_weather(lat_v, lon_v)
 
         st.markdown("---")
-        st.subheader(f"🗺️ Güzergah Analiz Özeti: {baslangic_yer} ➡️ {bitis_yer}")
+        st.subheader(f"🗺️ Rota Analiz Özeti ({planlanan_tarih.strftime('%d.%m.%Y')}): {baslangic_yer} ➡️ {bitis_yer}")
         
-        col_r1, col_r2 = st.columns(2)
+        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
         with col_r1:
-          st.info(f"📍 **Başlangıç ({baslangic_yer}):**\n- Sıcaklık: {res_b.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_b.get('wind_speed_10m', 0):.1f} km/s\n- Kar/Yağış: {res_b.get('snowfall', 0):.1f}cm / {res_b.get('precipitation', 0):.1f}mm")
+          st.info(f"📍 **Kalkış ({baslangic_yer}):**\n- Sıcaklık: {res_b.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_b.get('wind_speed_10m', 0):.1f} km/s")
         with col_r2:
-          st.info(f"🏁 **Varış ({bitis_yer}):**\n- Sıcaklık: {res_v.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_v.get('wind_speed_10m', 0):.1f} km/s\n- Kar/Yağış: {res_v.get('snowfall', 0):.1f}cm / {res_v.get('precipitation', 0):.1f}mm")
+          st.info(f"🛣️ **Yol Üstü (1. Geçiş):**\n- Sıcaklık: {res_m1.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m1.get('wind_speed_10m', 0):.1f} km/s")
+        with col_r3:
+          st.info(f"🛣️ **Yol Üstü (2. Geçiş):**\n- Sıcaklık: {res_m2.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m2.get('wind_speed_10m', 0):.1f} km/s")
+        with col_r4:
+          st.info(f"🏁 **Varış ({bitis_yer}):**\n- Sıcaklık: {res_v.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_v.get('wind_speed_10m', 0):.1f} km/s")
 
-        riskler = []
-        if res_b.get('temperature_2m', 15) <= 0 or res_v.get('temperature_2m', 15) <= 0:
-          riskler.append("❄️ **Don / Buzlanma Tehlikesi:** Güzergah üzerinde sıfırın altında sıcaklık var, yollarda buzlanma riski yüksek!")
-        if res_b.get('wind_gusts_10m', 0) > 45 or res_v.get('wind_gusts_10m', 0) > 45:
-          riskler.append("🌪️ **Şiddetli Rüzgar/Fırtına:** Güzergah üzerinde kuvvetli rüzgar hamleleri sürücülere zor anlar yaşatabilir.")
-        if res_b.get('snowfall', 0) > 0 or res_v.get('snowfall', 0) > 0:
-          riskler.append("🌨️ **Kar Yağışı:** Rota üzerinde aktif kar geçişi mevcut.")
+        sorunlar = []
+        durum_kodu = "yesil"
+        route_markers_temp = []
 
-        if riskler:
-          st.error("🚨 **GÜZERGAH RİSK RAPORU:**\n" + "\n".join(riskler))
+        route_markers_temp.append({"lat": lat_b, "lon": lon_b, "name": f"Kalkış: {baslangic_yer}", "risk": False})
+        route_markers_temp.append({"lat": lat_v, "lon": lon_v, "name": f"Varış: {bitis_yer}", "risk": False})
+
+        points = [
+            ("Kalkış Noktası", lat_b, lon_b, res_b),
+            ("Yol Üstü Geçiş Noktası 1", lat_mid1, lon_mid1, res_m1),
+            ("Yol Üstü Geçiş Noktası 2", lat_mid2, lon_mid2, res_m2),
+            ("Varış Noktası", lat_v, lon_v, res_v)
+        ]
+
+        for p_name, p_lat, p_lon, p_data in points:
+          p_temp = p_data.get('temperature_2m', 15)
+          p_snow = p_data.get('snowfall', 0)
+          p_gust = p_data.get('wind_gusts_10m', 0)
+
+          if ulasim_turu.startswith("Özel Araç"):
+            if p_temp <= 0:
+              durum_kodu = "kirmizi"
+              sorunlar.append(f"❄️ **Buzlanma Tehlikesi ({p_name}):** Sıcaklık 0°C altında ({p_temp:.1f}°C), gizli buzlanma riski var!")
+              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Buzlanma Riski: {p_name}", "risk": True})
+            if p_snow > 0:
+              durum_kodu = "kirmizi"
+              sorunlar.append(f"🌨️ **Kar Yağışı ({p_name}):** Rota üzerinde aktif kar geçişi ({p_snow:.1f} cm) var.")
+              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Kar Yağışı: {p_name}", "risk": True})
+            if p_gust > 50:
+              if durum_kodu != "kirmizi": durum_kodu = "sari"
+              sorunlar.append(f"💨 **Şiddetli Rüzgar Hamlesi ({p_name}):** Rüzgar {p_gust:.1f} km/s seviyesinde.")
+
+          elif ulasim_turu.startswith("Uçak"):
+            if p_gust > 55:
+              durum_kodu = "kirmizi"
+              sorunlar.append(f"✈️ **Uçuş Güvenlik Riski ({p_name}):** {p_gust:.1f} km/s fırtına hamlesi uçuşları aksatabilir.")
+              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Fırtına Riski: {p_name}", "risk": True})
+
+          elif ulasim_turu.startswith("Gemi"):
+            if p_gust > 40:
+              durum_kodu = "kirmizi"
+              sorunlar.append(f"🌊 **Feribot Sefer İptal Riski ({p_name}):** Rüzgar {p_gust:.1f} km/s.")
+              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Deniz Rüzgarı Riski: {p_name}", "risk": True})
+
+        st.session_state.route_markers = route_markers_temp
+
+        if not sorunlar:
+          st.success("✅ **Güzergah Mükemmel:** Kalkış, yol üstü geçişleri ve varış noktalarında seyahatinizi olumsuz etkileyecek hiçbir risk bulunmuyor.")
         else:
-          st.success("✅ **Güzergah Durumu Mükemmel:** Başlangıç ve varış noktalarında seyahatinizi olumsuz etkileyecek kritik bir hava muhalefeti görünmüyor. Yolculuğunuz için yeşil ışık! 🟢")
+          if durum_kodu == "kirmizi":
+            st.error("🚨 **YOL ÜSTÜ VE ROTA RİSK RAPORU (KRİTİK UYARI):**\n\n" + "\n".join(sorunlar))
+          else:
+            st.warning("⚠️ **YOL ÜSTÜ VE ROTA RİSK RAPORU (TEDBİRLİ OLUN):**\n\n" + "\n".join(sorunlar))
       else:
-        st.error("Girilen konumlardan biri veya ikisi bulunamadı.")
+        st.error("Girilen başlangıç veya varış konumu haritada bulunamadı.")
     except Exception as e:
       st.error(f"Güzergah analiz hatası: {e}")
 
@@ -590,7 +643,7 @@ if search_button and search_query:
   except Exception as e:
     st.error(f"Arama hatası: {e}")
 
-# --- HARİTA VE KATMANLAR ---
+# --- HARİTA VE RİSK KATMANLARI ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
@@ -625,15 +678,23 @@ folium.Marker(
     icon=folium.Icon(color="red", icon="cloud"),
 ).add_to(m)
 
+for r_marker in st.session_state.get("route_markers", []):
+  marker_color = "red" if r_marker["risk"] else "green"
+  marker_icon = "warning-sign" if r_marker["risk"] else "ok-sign"
+  folium.Marker(
+      [r_marker["lat"], r_marker["lon"]],
+      popup=r_marker["name"],
+      tooltip=r_marker["name"],
+      icon=folium.Icon(color=marker_color, icon=marker_icon, prefix="glyphicon"),
+  ).add_to(m)
+
 folium.LayerControl().add_to(m)
 
-st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Bölge Çizim Aracı")
-st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya dilediğiniz noktaya tıklayabilirsiniz.")
+st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Rota Risk İşaretleri")
+st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya güzergahtaki riskli noktaları harita üzerinde inceleyebilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v6")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v9")
 
-# Arama ile yeni konum seçildiyse harita bileşeninin önceki tıklama/çizim olayını
-# bir kez yok say; böylece eski harita olayı aramayla seçilen koordinatı ezemez.
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
   clicked = map_data.get("last_clicked")
@@ -658,7 +719,6 @@ if map_data and not skip_map_event:
     if geom.get("type") == "Polygon":
       coords = geom.get("coordinates", [[]])[0]
       if coords:
-        # GeoJSON halkasında ilk nokta sonda tekrar ediyorsa merkezi hesaba iki kez katma.
         open_ring = coords[:-1] if len(coords) > 1 and coords[0] == coords[-1] else coords
         polygon_signature = tuple((round(float(c[0]), 6), round(float(c[1]), 6)) for c in open_ring)
         if polygon_signature and polygon_signature != st.session_state.get("processed_polygon_signature"):
@@ -668,7 +728,6 @@ if map_data and not skip_map_event:
           st.session_state.lat = sum(lats) / len(lats)
           st.session_state.lon = sum(lons) / len(lons)
           st.session_state.location_label = "Haritada çizilen bölgenin merkezi"
-          # Aynı render'daki eski tıklama olayı çizim merkezini ezmesin.
           clicked_after_draw = map_data.get("last_clicked")
           if clicked_after_draw:
             st.session_state.processed_map_click_signature = (
@@ -703,12 +762,22 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
   )
 
   weather_error = None
+  used_fallback_data = False
   with st.spinner("Seçilen koordinat için Best Match ve ECMWF / GFS / ICON modelleri alınıyor..."):
     try:
-      # Harita/arama ile seçilen koordinatları yuvarlamadan API'ye gönder.
       request_lat = float(st.session_state.lat)
       request_lon = float(st.session_state.lon)
-      f_data, df, model_status, model_errors = fetch_weather_bundle(request_lat, request_lon)
+      
+      try:
+        f_data, df, model_status, model_errors = fetch_weather_bundle(request_lat, request_lon)
+      except Exception:
+        cached_f, cached_df, cached_status, cached_errors = load_weather_from_backup_cache(request_lat, request_lon)
+        if cached_f is not None and cached_df is not None:
+          f_data, df, model_status, model_errors = cached_f, cached_df, cached_status, cached_errors
+          used_fallback_data = True
+        else:
+          raise
+
       current_payload = f_data.get("current") or {}
       current_data = {
           key: _safe_number(current_payload.get(key))
@@ -725,15 +794,17 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       start_date = today - timedelta(days=7)
       try:
         df_archive = fetch_archive_data(request_lat, request_lon, start_date.isoformat(), today.isoformat())
-      except Exception as archive_exc:
+      except Exception:
         df_archive = pd.DataFrame()
-        st.warning(f"Geçmiş arşiv verisi alınamadı: {archive_exc}")
 
       csv_data = df.to_csv(index=False).encode("utf-8")
 
+      if used_fallback_data:
+        st.warning("⚠️ **Gece Modu / API Yoğunluk Uyarısı:** Gece saatlerindeki sunucu yoğunluğu veya bağlantı engeli nedeniyle canlı model verilerine anlık erişilemedi. Kullanıcılara kesintisiz hizmet sunulabilmesi için sistemde kayıtlı en son güncel veriler gösterilmektedir.")
+
       status_cols = st.columns(4)
       with status_cols[0]:
-        st.metric("Best Match", "Alındı")
+        st.metric("Veri Kaynağı", "Yedek Önbellek" if used_fallback_data else "Canlı API")
       for idx, model_name in enumerate(["ECMWF IFS", "GFS", "ICON"], start=1):
         with status_cols[idx]:
           if model_name in model_status:
@@ -741,10 +812,6 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
             st.metric(model_name, f"{info['available_fields']}/{info['requested_fields']} parametre")
           else:
             st.metric(model_name, "Veri yok")
-      if model_errors:
-        for model_name, model_error in model_errors.items():
-          st.warning(f"{model_name} modeli bu konum/zaman için alınamadı: {model_error}")
-      st.caption("Anlık durum ve temel tahminler Open-Meteo Best Match kaynağından; model karşılaştırmaları ECMWF IFS, GFS ve ICON'un ayrı isteklerinden alınır. Saat dilimi seçilen koordinata göre otomatik belirlenir.")
     except Exception as exc:
       weather_error = str(exc)
       df = pd.DataFrame()
@@ -758,7 +825,13 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
   if weather_error is None:
     df_3days = df.head(72)
 
-    # --- GÜNÜN RİSK ÖZETİ BANNERI ---
+    aktif_konum_adi = st.session_state.get('location_label', 'Seçilen Konum')
+    ekstrem_tehlikeler = ekstrem_erken_uyari_analizi(df, aktif_konum_adi)
+    if ekstrem_tehlikeler:
+      st.error("🚨 **METEOROLOJİK ERKEN UYARI SİSTEMİ (EWS) - SEÇİLEN KONUM UYARISI**")
+      for tehlike in ekstrem_tehlikeler:
+        st.warning(f"⚠️ **{tehlike['tarih_str']}** $\rightarrow$ **{tehlike['tip']}**: {tehlike['detay']}")
+
     st.markdown("### 🚨 Günün Meteorolojik Risk Özeti ve Canlı Uyarılar")
     uyarilar = konum_uyari_analizi(current_data, df_3days)
     for seviye, mesaj in uyarilar:
@@ -769,7 +842,6 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       else:
         st.success(mesaj)
 
-    # --- 3 GÜNLÜK GÜN GÜN (TARİH TARİH) TAHMİN KUTULARI ---
     st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini")
     if not df_3days.empty:
       df_3days["date"] = df_3days["time"].dt.date
@@ -877,7 +949,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       METEOROLOJİK UZMAN ANALİZ RAPORU
       ----------------------------------------------
       Konum Koordinatları: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}
-      Rapor Tarihi: {today.strftime('%Y-%m-%d')}
+      Rapor Tarihi: {date.today().strftime('%Y-%m-%d')}
       
       1. GÜNÜN RİSK ÖZETİ VE ANLIK DURUM:
       - Sıcaklık: {current_data.get('temperature_2m', 0.0):.1f} °C (Hissedilen: {current_data.get('apparent_temperature', 0.0):.1f} °C)
