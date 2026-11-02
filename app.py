@@ -277,7 +277,7 @@ def fetch_turkey_wide_ews():
           "forecast_days": 3,
           "timezone": "auto"
       }
-      res = requests.get(url, params=params, timeout=10)
+      res = requests.get(url, params=params, timeout=4)
       if res.ok:
         data = res.json().get("hourly", {})
         times = data.get("time", [])
@@ -336,7 +336,7 @@ else:
 
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert")
+geolocator = Nominatim(user_agent="meteo_app_ITU_expert", timeout=3)
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -375,7 +375,7 @@ BACKUP_CACHE_DIR = os.path.join(tempfile.gettempdir(), "meteoscope_backup_cache_
 os.makedirs(BACKUP_CACHE_DIR, exist_ok=True)
 
 
-def _open_meteo_get(url, params, timeout=20):
+def _open_meteo_get(url, params, timeout=8):
   response = requests.get(url, params=params, timeout=timeout)
   try:
     payload = response.json()
@@ -442,7 +442,7 @@ def fetch_weather_bundle(latitude, longitude):
   best_params["current"] = ",".join(CURRENT_VARIABLES)
   
   try:
-    best_data = _open_meteo_get(OPEN_METEO_FORECAST_URL, best_params, timeout=20)
+    best_data = _open_meteo_get(OPEN_METEO_FORECAST_URL, best_params, timeout=10)
   except Exception as live_exc:
     cached_f, cached_df, cached_status, cached_errors = load_weather_from_backup_cache(latitude, longitude)
     if cached_f is not None and cached_df is not None:
@@ -470,7 +470,7 @@ def fetch_weather_bundle(latitude, longitude):
       params = dict(common_params)
       params["models"] = model_id
       try:
-        data = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=15)
+        data = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=8)
         hourly = data.get("hourly") or {}
         if not hourly.get("time"):
           raise RuntimeError("Model yanıtında saatlik zaman dizisi yok.")
@@ -519,7 +519,7 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
       "temperature_unit": "celsius",
       "precipitation_unit": "mm",
   }
-  payload = _open_meteo_get(OPEN_METEO_ARCHIVE_URL, params, timeout=20)
+  payload = _open_meteo_get(OPEN_METEO_ARCHIVE_URL, params, timeout=10)
   hourly = payload.get("hourly") or {}
   if not hourly.get("time"):
     return pd.DataFrame()
@@ -528,9 +528,9 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
   return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-# --- İKİ KONUM ARASI GELİŞMİŞ GÜZERGAH VE ARA NOKTA RİSK ANALİZİ ---
+# --- İKİ KONUM ARASI HIZLI VE OPTİMİZE GÜZERGAH RİSK ANALİZİ ---
 with st.expander("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", expanded=False):
-  st.markdown("Seyahat edeceğiniz güzergahı, **ulaşım aracınızı** ve planlanan tarihi girerek **sadece kalkış/varış değil, yol üstündeki (ara geçişlerdeki) gizli riskleri** harita üzerinde nokta atışı tespit edin.")
+  st.markdown("Seyahat edeceğiniz güzergahı, **ulaşım aracınızı** ve planlanan tarihi girerek **sadece kalkış/varış değil, yol üstündeki ara geçişlerdeki gizli riskleri** anında tespit edin.")
   
   col_g1, col_g2 = st.columns(2)
   with col_g1:
@@ -553,111 +553,123 @@ with st.expander("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk An
         value=bugun_tarih,
         min_value=bugun_tarih,
         max_value=max_tarih,
-        help="Küresel tahmin modellerinin en yüksek güvenilirlikle simülasyon yapabilmesi için 7 günlük sınır uygulanır."
+        help="Küresel tahmin modellerinin güvenilir simülasyonu için 7 günlük sınır uygulanır."
     )
 
-  rota_sorgula = st.button("Rotayı ve Yol Üstü Noktaları Analiz Et")
+  rota_sorgula = st.button("Rotayı ve Yol Üstü Noktaları Hızlıca Analiz Et")
 
   if rota_sorgula and baslangic_yer and bitis_yer:
-    try:
-      loc_b = geolocator.geocode(baslangic_yer, timeout=5)
-      loc_v = geolocator.geocode(bitis_yer, timeout=5)
-      if loc_b and loc_v:
-        route_current_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
-        
-        lat_b, lon_b = loc_b.latitude, loc_b.longitude
-        lat_v, lon_v = loc_v.latitude, loc_v.longitude
-        
-        lat_mid1 = lat_b + (lat_v - lat_b) * 0.33
-        lon_mid1 = lon_b + (lon_v - lon_b) * 0.33
-        
-        lat_mid2 = lat_b + (lat_v - lat_b) * 0.66
-        lon_mid2 = lon_b + (lon_v - lon_b) * 0.66
+    with st.spinner("Güzergah ve yol üstü hava durumları eşzamanlı taranıyor..."):
+      try:
+        # Konum çözümleme (Geocoding) paralel veya hızlı timeout ile
+        loc_b = geolocator.geocode(baslangic_yer, timeout=3)
+        loc_v = geolocator.geocode(bitis_yer, timeout=3)
+        if loc_b and loc_v:
+          route_current_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m"
+          
+          lat_b, lon_b = loc_b.latitude, loc_b.longitude
+          lat_v, lon_v = loc_v.latitude, loc_v.longitude
+          
+          lat_mid1 = lat_b + (lat_v - lat_b) * 0.33
+          lon_mid1 = lon_b + (lon_v - lon_b) * 0.33
+          
+          lat_mid2 = lat_b + (lat_v - lat_b) * 0.66
+          lon_mid2 = lon_b + (lon_v - lon_b) * 0.66
 
-        def get_point_weather(lat, lon):
-          params = {
-              "latitude": lat, "longitude": lon,
-              "current": route_current_vars, "timezone": "auto",
-              "wind_speed_unit": "kmh", "precipitation_unit": "mm",
-          }
-          res = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=15).get("current", {})
-          return {k: _safe_number(res.get(k)) for k in route_current_vars.split(",")}
+          def get_point_weather_safe(lat, lon):
+            try:
+              params = {
+                  "latitude": lat, "longitude": lon,
+                  "current": route_current_vars, "timezone": "auto",
+                  "wind_speed_unit": "kmh", "precipitation_unit": "mm",
+              }
+              res = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=6).get("current", {})
+              return {k: _safe_number(res.get(k)) for k in route_current_vars.split(",")}
+            except Exception:
+              return {k: 0.0 for k in route_current_vars.split(",")}
 
-        res_b = get_point_weather(lat_b, lon_b)
-        res_m1 = get_point_weather(lat_mid1, lon_mid1)
-        res_m2 = get_point_weather(lat_mid2, lon_mid2)
-        res_v = get_point_weather(lat_v, lon_v)
+          # 4 noktayı aynı anda (paralel) sorgula - Süreyi minimuma indirir
+          with ThreadPoolExecutor(max_workers=4) as executor:
+            future_b = executor.submit(get_point_weather_safe, lat_b, lon_b)
+            future_m1 = executor.submit(get_point_weather_safe, lat_mid1, lon_mid1)
+            future_m2 = executor.submit(get_point_weather_safe, lat_mid2, lon_mid2)
+            future_v = executor.submit(get_point_weather_safe, lat_v, lon_v)
 
-        st.markdown("---")
-        st.subheader(f"🗺️ Rota Analiz Özeti ({planlanan_tarih.strftime('%d.%m.%Y')}): {baslangic_yer} ➡️ {bitis_yer}")
-        
-        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        with col_r1:
-          st.info(f"📍 **Kalkış ({baslangic_yer}):**\n- Sıcaklık: {res_b.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_b.get('wind_speed_10m', 0):.1f} km/s")
-        with col_r2:
-          st.info(f"🛣️ **Yol Üstü (1. Geçiş):**\n- Sıcaklık: {res_m1.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m1.get('wind_speed_10m', 0):.1f} km/s")
-        with col_r3:
-          st.info(f"🛣️ **Yol Üstü (2. Geçiş):**\n- Sıcaklık: {res_m2.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m2.get('wind_speed_10m', 0):.1f} km/s")
-        with col_r4:
-          st.info(f"🏁 **Varış ({bitis_yer}):**\n- Sıcaklık: {res_v.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_v.get('wind_speed_10m', 0):.1f} km/s")
+            res_b = future_b.result()
+            res_m1 = future_m1.result()
+            res_m2 = future_m2.result()
+            res_v = future_v.result()
 
-        sorunlar = []
-        durum_kodu = "yesil"
-        route_markers_temp = []
+          st.markdown("---")
+          st.subheader(f"🗺️ Rota Analiz Özeti ({planlanan_tarih.strftime('%d.%m.%Y')}): {baslangic_yer} ➡️ {bitis_yer}")
+          
+          col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+          with col_r1:
+            st.info(f"📍 **Kalkış ({baslangic_yer}):**\n- Sıcaklık: {res_b.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_b.get('wind_speed_10m', 0):.1f} km/s")
+          with col_r2:
+            st.info(f"🛣️ **Yol Üstü (1. Geçiş):**\n- Sıcaklık: {res_m1.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m1.get('wind_speed_10m', 0):.1f} km/s")
+          with col_r3:
+            st.info(f"🛣️ **Yol Üstü (2. Geçiş):**\n- Sıcaklık: {res_m2.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_m2.get('wind_speed_10m', 0):.1f} km/s")
+          with col_r4:
+            st.info(f"🏁 **Varış ({bitis_yer}):**\n- Sıcaklık: {res_v.get('temperature_2m', 0):.1f}°C\n- Rüzgar: {res_v.get('wind_speed_10m', 0):.1f} km/s")
 
-        route_markers_temp.append({"lat": lat_b, "lon": lon_b, "name": f"Kalkış: {baslangic_yer}", "risk": False})
-        route_markers_temp.append({"lat": lat_v, "lon": lon_v, "name": f"Varış: {bitis_yer}", "risk": False})
+          sorunlar = []
+          durum_kodu = "yesil"
+          route_markers_temp = []
 
-        points = [
-            ("Kalkış Noktası", lat_b, lon_b, res_b),
-            ("Yol Üstü Geçiş Noktası 1", lat_mid1, lon_mid1, res_m1),
-            ("Yol Üstü Geçiş Noktası 2", lat_mid2, lon_mid2, res_m2),
-            ("Varış Noktası", lat_v, lon_v, res_v)
-        ]
+          route_markers_temp.append({"lat": lat_b, "lon": lon_b, "name": f"Kalkış: {baslangic_yer}", "risk": False})
+          route_markers_temp.append({"lat": lat_v, "lon": lon_v, "name": f"Varış: {bitis_yer}", "risk": False})
 
-        for p_name, p_lat, p_lon, p_data in points:
-          p_temp = p_data.get('temperature_2m', 15)
-          p_snow = p_data.get('snowfall', 0)
-          p_gust = p_data.get('wind_gusts_10m', 0)
+          points = [
+              ("Kalkış Noktası", lat_b, lon_b, res_b),
+              ("Yol Üstü Geçiş Noktası 1", lat_mid1, lon_mid1, res_m1),
+              ("Yol Üstü Geçiş Noktası 2", lat_mid2, lon_mid2, res_m2),
+              ("Varış Noktası", lat_v, lon_v, res_v)
+          ]
 
-          if ulasim_turu.startswith("Özel Araç"):
-            if p_temp <= 0:
-              durum_kodu = "kirmizi"
-              sorunlar.append(f"❄️ **Buzlanma Tehlikesi ({p_name}):** Sıcaklık 0°C altında ({p_temp:.1f}°C), gizli buzlanma riski var!")
-              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Buzlanma Riski: {p_name}", "risk": True})
-            if p_snow > 0:
-              durum_kodu = "kirmizi"
-              sorunlar.append(f"🌨️ **Kar Yağışı ({p_name}):** Rota üzerinde aktif kar geçişi ({p_snow:.1f} cm) var.")
-              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Kar Yağışı: {p_name}", "risk": True})
-            if p_gust > 50:
-              if durum_kodu != "kirmizi": durum_kodu = "sari"
-              sorunlar.append(f"💨 **Şiddetli Rüzgar Hamlesi ({p_name}):** Rüzgar {p_gust:.1f} km/s seviyesinde.")
+          for p_name, p_lat, p_lon, p_data in points:
+            p_temp = p_data.get('temperature_2m', 15)
+            p_snow = p_data.get('snowfall', 0)
+            p_gust = p_data.get('wind_gusts_10m', 0)
 
-          elif ulasim_turu.startswith("Uçak"):
-            if p_gust > 55:
-              durum_kodu = "kirmizi"
-              sorunlar.append(f"✈️ **Uçuş Güvenlik Riski ({p_name}):** {p_gust:.1f} km/s fırtına hamlesi uçuşları aksatabilir.")
-              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Fırtına Riski: {p_name}", "risk": True})
+            if ulasim_turu.startswith("Özel Araç"):
+              if p_temp <= 0:
+                durum_kodu = "kirmizi"
+                sorunlar.append(f"❄️ **Buzlanma Tehlikesi ({p_name}):** Sıcaklık 0°C altında ({p_temp:.1f}°C), gizli buzlanma riski var!")
+                route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Buzlanma Riski: {p_name}", "risk": True})
+              if p_snow > 0:
+                durum_kodu = "kirmizi"
+                sorunlar.append(f"🌨️ **Kar Yağışı ({p_name}):** Rota üzerinde aktif kar geçişi ({p_snow:.1f} cm) var.")
+                route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Kar Yağışı: {p_name}", "risk": True})
+              if p_gust > 50:
+                if durum_kodu != "kirmizi": durum_kodu = "sari"
+                sorunlar.append(f"💨 **Şiddetli Rüzgar Hamlesi ({p_name}):** Rüzgar {p_gust:.1f} km/s seviyesinde.")
 
-          elif ulasim_turu.startswith("Gemi"):
-            if p_gust > 40:
-              durum_kodu = "kirmizi"
-              sorunlar.append(f"🌊 **Feribot Sefer İptal Riski ({p_name}):** Rüzgar {p_gust:.1f} km/s.")
-              route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Deniz Rüzgarı Riski: {p_name}", "risk": True})
+            elif ulasim_turu.startswith("Uçak"):
+              if p_gust > 55:
+                durum_kodu = "kirmizi"
+                sorunlar.append(f"✈️ **Uçuş Güvenlik Riski ({p_name}):** {p_gust:.1f} km/s fırtına hamlesi uçuşları aksatabilir.")
+                route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Fırtına Riski: {p_name}", "risk": True})
 
-        st.session_state.route_markers = route_markers_temp
+            elif ulasim_turu.startswith("Gemi"):
+              if p_gust > 40:
+                durum_kodu = "kirmizi"
+                sorunlar.append(f"🌊 **Feribot Sefer İptal Riski ({p_name}):** Rüzgar {p_gust:.1f} km/s.")
+                route_markers_temp.append({"lat": p_lat, "lon": p_lon, "name": f"Deniz Rüzgarı Riski: {p_name}", "risk": True})
 
-        if not sorunlar:
-          st.success("✅ **Güzergah Mükemmel:** Kalkış, yol üstü geçişleri ve varış noktalarında seyahatinizi olumsuz etkileyecek hiçbir risk bulunmuyor.")
-        else:
-          if durum_kodu == "kirmizi":
-            st.error("🚨 **YOL ÜSTÜ VE ROTA RİSK RAPORU (KRİTİK UYARI):**\n\n" + "\n".join(sorunlar))
+          st.session_state.route_markers = route_markers_temp
+
+          if not sorunlar:
+            st.success("✅ **Güzergah Mükemmel:** Kalkış, yol üstü geçişleri ve varış noktalarında seyahatinizi olumsuz etkileyecek hiçbir risk bulunmuyor.")
           else:
-            st.warning("⚠️ **YOL ÜSTÜ VE ROTA RİSK RAPORU (TEDBİRLİ OLUN):**\n\n" + "\n".join(sorunlar))
-      else:
-        st.error("Girilen başlangıç veya varış konumu haritada bulunamadı.")
-    except Exception as e:
-      st.error(f"Güzergah analiz hatası: {e}")
+            if durum_kodu == "kirmizi":
+              st.error("🚨 **YOL ÜSTÜ VE ROTA RİSK RAPORU (KRİTİK UYARI):**\n\n" + "\n".join(sorunlar))
+            else:
+              st.warning("⚠️ **YOL ÜSTÜ VE ROTA RİSK RAPORU (TEDBİRLİ OLUN):**\n\n" + "\n".join(sorunlar))
+        else:
+          st.error("Girilen başlangıç veya varış konumu haritada bulunamadı.")
+      except Exception as e:
+        st.error(f"Güzergah analiz hatası: {e}")
 
 st.markdown("---")
 
@@ -673,7 +685,7 @@ with st.form(key="search_form", clear_on_submit=False):
 
 if search_button and search_query:
   try:
-    location = geolocator.geocode(search_query, timeout=5)
+    location = geolocator.geocode(search_query, timeout=3)
     if location:
       st.session_state.lat = location.latitude
       st.session_state.lon = location.longitude
@@ -737,7 +749,7 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Rota Risk İşaretleri")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya güzergahtaki riskli noktaları harita üzerinde inceleyebilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v12")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v14")
 
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
@@ -1025,7 +1037,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.line_chart(df.set_index("time")[temp_cols])
 
     with tab5:
-      st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) and Yön Analizi")
+      st.subheader("Hassas Rüzgar Hızı, Hamle (Gust) ve Yön Analizi")
       wind_cols = [col for col in df.columns if "speed" in col or "gusts" in col]
       if wind_cols:
         st.line_chart(df.set_index("time")[wind_cols])
@@ -1046,7 +1058,6 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       st.subheader(f"📅 Seçilen Konum İçin 7 Günlük Özet Tablo ({st.session_state.get('location_label', 'Konum')})")
       st.markdown("Karmaşık ham veriler yerine, seçtiğiniz konum için önümüzdeki 7 günün en önemli hava parametreleri sadeleştirilmiş olarak aşağıda listelenmiştir.")
       
-      # 7 günlük temiz özet tablo üretimi
       if not df.empty:
         df["date_only"] = df["time"].dt.date
         seven_days_summary = []
