@@ -13,7 +13,7 @@ import os
 import sqlite3
 import json
 import tempfile
-import streamlit.components.v1 as components
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -24,13 +24,11 @@ st.set_page_config(
 
 # --- KUSURSUZ AKTİF OTURUM VE TOPLAM ZİYARETÇİ SİSTEMİ ---
 COUNTER_DB = "meteo_counters.db"
-# Bir cihaz 20 saniye boyunca sinyal (heartbeat) göndermezse aktif oturumdan düşer.
 HEARTBEAT_TIMEOUT_SECONDS = 20
 
 
 @st.cache_resource(show_spinner=False)
 def get_heartbeat_component():
-    """Tarayıcının aktif sekmede açık olup olmadığını her 10 saniyede bir sunucuya bildiren mini JavaScript bileşeni."""
     component_dir = os.path.join(tempfile.gettempdir(), "meteoscope_heartbeat_v7")
     os.makedirs(component_dir, exist_ok=True)
     html_path = os.path.join(component_dir, "index.html")
@@ -65,11 +63,8 @@ def get_heartbeat_component():
   }
 
   const visitorId = getVisitorId();
-
-  // İlk açılışta kimliği Python'a bildir
   sendToStreamlit("streamlit:setComponentValue", { value: { action: "register", visitor_id: visitorId } });
 
-  // Sayfa açık olduğu sürece her 10 saniyede bir aktiflik sinyali (heartbeat) gönder
   setInterval(function () {
     if (!document.hidden) {
       sendToStreamlit("streamlit:setComponentValue", { value: { action: "heartbeat", visitor_id: visitorId } });
@@ -123,11 +118,9 @@ def initialize_counter_db():
 
 initialize_counter_db()
 
-# Tarayıcı bileşenini çağır
 heartbeat_component = get_heartbeat_component()
 hb_result = heartbeat_component(key="meteoscope_hb_comp", default=None, height=0)
 
-# JS'den gelen sinyale göre veritabanını güncelle
 if isinstance(hb_result, dict):
     v_id = hb_result.get("visitor_id")
     action = hb_result.get("action")
@@ -139,7 +132,6 @@ if isinstance(hb_result, dict):
                     "INSERT OR IGNORE INTO unique_visitors (visitor_id, first_seen) VALUES (?, ?)",
                     (v_id, now),
                 )
-            # Hem register hem heartbeat anlık oturum zamanını günceller
             conn.execute("""
                 INSERT INTO active_sessions (visitor_id, last_seen)
                 VALUES (?, ?)
@@ -151,9 +143,7 @@ def read_counter_values():
     now = time.time()
     cutoff = now - HEARTBEAT_TIMEOUT_SECONDS
     with get_counter_connection() as conn:
-        # Süresi dolmuş (sayfadan çıkmış/kapatmış) oturumları temizle
         conn.execute("DELETE FROM active_sessions WHERE last_seen < ?", (cutoff,))
-        
         total_visitors = conn.execute(
             "SELECT COUNT(*) FROM unique_visitors"
         ).fetchone()[0]
@@ -198,7 +188,6 @@ def giyim_onerisi_olustur(
 # --- TEK KONUM AKILLI UYARI SİSTEMİ ---
 def konum_uyari_analizi(curr_data, df_3days):
   uyarilar = []
-  
   if curr_data.get("temperature_2m", 15) <= 0:
     uyarilar.append(("kirmizi", "❄️ **Don / Buzlanma Riski:** Sıcaklık 0°C veya altında! Yollarda gizli buzlanma görülebilir."))
   elif curr_data.get("temperature_2m", 15) < 5:
@@ -231,17 +220,14 @@ def konum_uyari_analizi(curr_data, df_3days):
   return uyarilar
 
 
-# --- METEOROLOJİK ERKEN UYARI SİSTEMİ (EWS) ---
 def ekstrem_erken_uyari_analizi(df_7days, konum_adi):
   if df_7days.empty:
     return []
-
   tehlikeler = []
   for _, row in df_7days.iterrows():
     t_time = row["time"]
     precip = row.get("precipitation", 0)
     gust = row.get("wind_gusts_10m", 0)
-
     if precip >= 15.0:
       tehlikeler.append({
           "tarih_str": t_time.strftime("%d %B %Y, Saat: %H:00"),
@@ -256,8 +242,56 @@ def ekstrem_erken_uyari_analizi(df_7days, konum_adi):
           "detay": f"Seçilen konumda ({konum_adi}) anlık rüzgar hamlesi {gust:.1f} km/s seviyesine ulaşabilir.",
           "seviye": "kirmizi"
       })
-
   return tehlikeler
+
+
+# --- TÜRKİYE GENELİ MERKEZİ AFET VE ERKEN UYARI MASASI ---
+TURKEY_REGIONAL_CENTERS = {
+    "Marmara (İstanbul)": (41.0082, 28.9784),
+    "İç Anadolu (Ankara)": (39.9334, 32.8597),
+    "Ege (İzmir)": (38.4192, 27.1287),
+    "Akdeniz (Antalya)": (36.8969, 30.7133),
+    "Karadeniz (Trabzon)": (41.0015, 39.7178),
+    "Doğu Anadolu (Erzurum)": (39.9043, 41.2679),
+    "Güneydoğu Anadolu (Diyarbakır)": (37.9144, 40.2306),
+}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_turkey_wide_ews():
+  global_alerts = []
+  def check_center(name, lat, lon):
+    try:
+      url = "https://api.open-meteo.com/v1/forecast"
+      params = {
+          "latitude": lat, "longitude": lon,
+          "hourly": "precipitation,wind_gusts_10m",
+          "forecast_days": 3,
+          "timezone": "auto"
+      }
+      res = requests.get(url, params=params, timeout=10)
+      if res.ok:
+        data = res.json().get("hourly", {})
+        times = data.get("time", [])
+        precips = data.get("precipitation", [])
+        gusts = data.get("wind_gusts_10m", [])
+        for t, p, g in zip(times, precips, gusts):
+          p_val = _safe_number(p)
+          g_val = _safe_number(g)
+          if p_val >= 18.0:
+            return {"bolge": name, "tip": "Şiddetli Sağanak / Sel Riski", "deger": f"{p_val:.1f} mm/saat", "zaman": t}
+          elif g_val >= 70.0:
+            return {"bolge": name, "tip": "Şiddetli Fırtına Hamlesi", "deger": f"{g_val:.1f} km/s", "zaman": t}
+    except Exception:
+      pass
+    return None
+
+  with ThreadPoolExecutor(max_workers=len(TURKEY_REGIONAL_CENTERS)) as executor:
+    futures = {executor.submit(check_center, name, coords[0], coords[1]): name for name, coords in TURKEY_REGIONAL_CENTERS.items()}
+    for future in as_completed(futures):
+      res = future.result()
+      if res:
+        global_alerts.append(res)
+  return global_alerts
 
 
 # --- GİZLİ YÖNETİCİ PANELİ ---
@@ -266,10 +300,8 @@ with st.sidebar:
   st.title("MeteoScope-TR")
   st.caption("Gelişmiş Meteoroloji & Uzman Paneli")
   st.markdown("---")
-
   st.subheader("🔐 Gizli Yönetici Girişi")
   yonetici_sifre = st.text_input("Yönetici Şifresi", type="password", key="admin_pass")
-
   if yonetici_sifre == "meteo2026":
     st.success("✅ Yönetici Modu Aktif")
     render_live_admin_metrics()
@@ -282,6 +314,17 @@ with st.sidebar:
 
 # --- ANA UYGULAMA ---
 st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
+
+# --- 🚨 DİKKAT ÇEKİCİ EN ÜST TÜRKİYE GENELİ ERKEN UYARI ÖZET MASASI ---
+turkiye_riskler = fetch_turkey_wide_ews()
+if not turkiye_riskler:
+  st.success("🟢 **TÜRKİYE GENELİ ERKEN UYARI MASASI — DURUM STABİL:** Ülke genelindeki stratejik merkezlerde önümüzdeki 3 gün boyunca ekstrem bir afet riski (fırtına, şiddetli sel) tespit edilmemiştir.")
+else:
+  st.error("🚨 **ALARM! TÜRKİYE GENELİNDE KRİTİK METEOROLOJİK AFET UYARISI TESPİT EDİLDİ!**")
+  for r in turkiye_riskler:
+    t_fmt = pd.to_datetime(r['zaman']).strftime('%d %B %Y, Saat: %H:00')
+    st.warning(f"⚠️ **{r['bolge']}** bölgesinde **{r['tip']}** ({r['deger']}) bekleniyor! | Tahmini Zaman: **{t_fmt}**")
+
 st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
 
 geolocator = Nominatim(user_agent="meteo_app_ITU_expert")
@@ -419,7 +462,6 @@ def fetch_weather_bundle(latitude, longitude):
 
   model_status = {}
   model_errors = {}
-  from concurrent.futures import ThreadPoolExecutor, as_completed
 
   def fetch_one_model(model_spec):
     display_name, suffix, model_ids = model_spec
@@ -619,13 +661,15 @@ with st.expander("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk An
 
 st.markdown("---")
 
-col1, col2 = st.columns([3, 1])
-with col1:
-  search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Moskova, Erzurum veya İstanbul", key="main_search")
-with col2:
-  st.write("")
-  st.write("")
-  search_button = st.button("Konuma Git")
+# --- ENTER TUŞUYLA ÇALIŞAN AKILLI ARAMA FORMU ---
+with st.form(key="search_form", clear_on_submit=False):
+  col1, col2 = st.columns([3, 1])
+  with col1:
+    search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Moskova, Erzurum veya İstanbul", key="main_search_input")
+  with col2:
+    st.write("")
+    st.write("")
+    search_button = st.form_submit_button("Konuma Git 🚀")
 
 if search_button and search_query:
   try:
@@ -693,7 +737,7 @@ folium.LayerControl().add_to(m)
 st.subheader("📍 İnteraktif Harita, Gelişmiş Katmanlar ve Rota Risk İşaretleri")
 st.info("Harita katmanlarını sağ üst köşeden değiştirebilir, alan çizebilir veya güzergahtaki riskli noktaları harita üzerinde inceleyebilirsiniz.")
 
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v9")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v10")
 
 skip_map_event = st.session_state.pop("skip_map_event_once", False)
 if map_data and skip_map_event:
