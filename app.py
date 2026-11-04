@@ -187,13 +187,8 @@ def giyim_onerisi_olustur(
     return "👔 **Giyim Önerisi:** Hava mevsim normallerinde."
 
 
-# --- SAAT BAZLI KONUM TEHLİKE TARAMA MOTORU (DİNAMİK MODEL VERİSİ) ---
+# --- SAAT BAZLI KONUM TEHLİKE TARAMA MOTORU ---
 def konum_saatlik_tehlike_taramasi(df):
-  """
-  Modelden gelen saatlik DataFrame'i tarar.
-  Eğer saatlik yağış >= 7.0 mm/s, rüzgar hamlesi >= 45 km/s veya CAPE >= 300 J/kg
-  olan bir zaman dilimi varsa bunları kronolojik olarak listeler.
-  """
   if df.empty or "time" not in df.columns:
     return []
   
@@ -205,7 +200,6 @@ def konum_saatlik_tehlike_taramasi(df):
     cape = _safe_number(row.get("cape", 0))
     temp = _safe_number(row.get("temperature_2m", 15))
 
-    # Tehlike kriterleri (Tamamen modelin sayısal çıktılarına dayanır)
     if precip >= 7.0:
       tehlikeli_saatler.append({
           "zaman": t,
@@ -234,7 +228,6 @@ def konum_saatlik_tehlike_taramasi(df):
           "deger": f"Sıcaklık: {temp:.1f}°C, Yağış Var",
           "seviye": "kirmizi"
       })
-      
   return tehlikeli_saatler
 
 
@@ -733,14 +726,17 @@ if search_button and search_query:
       st.session_state.zoom = 12
       st.session_state.son_arama = search_query
       st.session_state.location_label = location.address
-      st.session_state.skip_map_event_once = True
-      st.success(f"Bulunan Konum: {location.address}")
+      st.session_state.success_msg = f"Bulunan Konum: {location.address}"
+      st.rerun()
     else:
       st.error("Aradığınız konum bulunamadı.")
   except Exception as e:
     st.error(f"Arama hatası: {e}")
 
-# --- HARİTA ---
+if "success_msg" in st.session_state:
+  st.success(st.session_state.pop("success_msg"))
+
+# --- KUSURSUZ HARİTA SENRONİZASYONU ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
@@ -766,24 +762,28 @@ Draw(
 
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
-    popup="Seçilen Konum", tooltip="Aktif Konum",
+    popup=st.session_state.get('location_label', 'Seçilen Konum'),
+    tooltip="Aktif Konum",
     icon=folium.Icon(color="red", icon="cloud"),
 ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v24")
+map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v25")
 
-skip_map_event = st.session_state.pop("skip_map_event_once", False)
-if map_data and not skip_map_event:
+# Harita etkileşimlerini güvenli okuma (Arama sonrası çakışmayı önleyen korumalı blok)
+if map_data:
   clicked = map_data.get("last_clicked")
   if clicked:
-    st.session_state.lat = float(clicked["lat"])
-    st.session_state.lon = float(clicked["lng"])
-    st.session_state.zoom = m.options["zoom"]
-    st.session_state.location_label = "Harita üzerinde seçilen nokta"
-    st.rerun()
+    clicked_lat = float(clicked["lat"])
+    clicked_lon = float(clicked["lng"])
+    if (round(clicked_lat, 5) != round(st.session_state.lat, 5)) or (round(clicked_lon, 5) != round(st.session_state.lon, 5)):
+      st.session_state.lat = clicked_lat
+      st.session_state.lon = clicked_lon
+      st.session_state.zoom = map_data.get("zoom", st.session_state.zoom)
+      st.session_state.location_label = "Harita üzerinde seçilen nokta"
+      st.rerun()
 
 def degrees_to_cardinal(deg):
   if deg is None: return "N/A"
@@ -839,15 +839,13 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
   if weather_error is None:
     df_3days = df.head(72)
 
-    # --- 🕒 YENİ ÖZELLİK: SEÇİLEN KONUM İÇİN SAAT BAZLI TEHLİKE TARAMASI ---
     st.markdown("### ⏰ Seçilen Konum İçin Saat Bazlı Erken Uyarı & Kritik Saatler")
     saatlik_tehlikeler = konum_saatlik_tehlike_taramasi(df)
     
     if not saatlik_tehlikeler:
-      st.success("🟢 **Saat Bazlı Durum Stabil:** Seçilen konum için 7 günlük periyotta model verilerinde kritik bir saatlik eşik aşımı (şiddetli sağanak/fırtına) tespit edilmemiştir.")
+      st.success("🟢 **Saat Bazlı Durum Stabil:** Seçilen konum için 7 günlük periyotta model verilerinde kritik bir saatlik eşik aşımı tespit edilmemiştir.")
     else:
       st.warning(f"⚠️ **DİKKAT! Model verilerine göre bu konumda kritik eşikleri aşan {len(saatlik_tehlikeler)} adet tehlikeli saat dilimi tespit edildi:**")
-      
       saatlik_tablo_verisi = []
       for st_item in saatlik_tehlikeler:
         t_str = pd.to_datetime(st_item["zaman"]).strftime("%d %B %Y, Saat: %H:00")
