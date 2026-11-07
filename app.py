@@ -357,7 +357,7 @@ else:
     t_fmt = pd.to_datetime(r['zaman']).strftime('%d %B %Y, Saat: %H:00')
     st.warning(f"⚠️ **{r['bolge']}** bölgesinde **{r['tip']}** ({r['deger']}) bekleniyor! | Zaman: **{t_fmt}**")
 
-st.markdown("Dünya haritası üzerinden arama yapın veya haritada dilediğiniz yere tıklayın. Arama kutusu ve harita anında senkronize olur.")
+st.markdown("Dünya haritasında arama yapın veya haritaya tıklayın. Arama kutusu ve işaretçi çift yönlü senkronize edilir; harita seçimi arama alanına yazılır.")
 
 geolocator = Nominatim(user_agent="meteo_app_global_expert_v6", timeout=5)
 
@@ -375,6 +375,21 @@ if "search_input_val" not in st.session_state:
 if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
 
+# Harita seciminden gelen metinleri widget olusturulmadan once uygula.
+# Bu, Streamlit'in widget olusturulduktan sonra session_state degistirme
+# kisitlamasini onler ve arama alanini bir sonraki rerun'da senkronlar.
+if st.session_state.pop("_pending_main_search", None) is not None:
+  st.session_state["main_search_input"] = st.session_state.get("_pending_main_search_value", "")
+  st.session_state.search_input_val = st.session_state.get("_pending_main_search_value", "")
+  st.session_state.pop("_pending_main_search_value", None)
+
+if st.session_state.pop("_pending_route_start", None) is not None:
+  st.session_state["bas_yer"] = st.session_state.get("_pending_route_start_value", "")
+  st.session_state.pop("_pending_route_start_value", None)
+if st.session_state.pop("_pending_route_end", None) is not None:
+  st.session_state["bit_yer"] = st.session_state.get("_pending_route_end_value", "")
+  st.session_state.pop("_pending_route_end_value", None)
+
 
 # --- GLOBAL SEYAHAT VE GÜZERGAH RİSK ANALİZİ ---
 seyahat_acik = st.toggle("🚗 Global İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", value=False, help="Dünyanın herhangi iki noktası arasında coğrafi mantık ve hava risklerini denetleyen profesyonel seyahat masası.")
@@ -384,6 +399,12 @@ if seyahat_acik:
     st.markdown("### 🚗 Profesyonel ve Coğrafi Uyumlu Global Seyahat Analiz Masası")
     st.markdown("Dünyanın dilediğiniz iki noktası arasında güvenli seyahat planlayın.")
     
+    # Harita tiklamasi rota alanlarindan hangisini guncellesin?
+    route_map_target = st.radio(
+        "Güzergâh haritasına tıklayınca hangi konum güncellensin?",
+        ["Başlangıç", "Varış"], horizontal=True, key="route_map_target"
+    )
+
     col_g1, col_g2 = st.columns(2)
     with col_g1:
       baslangic_yer = st.text_input("Başlangıç Konumu (Global)", placeholder="Örn: Roma veya İstanbul", key="bas_yer")
@@ -551,7 +572,33 @@ if seyahat_acik:
             icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
         ).add_to(route_m)
 
-      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v5")
+      route_map_data = st_folium(
+          route_m, width="100%", height=450, key="global_route_map_view_v6_sync",
+          returned_objects=["last_clicked", "zoom"]
+      )
+
+      # Rota haritasina tiklandiginda secilen baslangic/varis kutusunu doldur.
+      route_clicked = route_map_data.get("last_clicked") if route_map_data else None
+      if route_clicked:
+        rlat = round(float(route_clicked.get("lat")), 6)
+        rlon = round(float(route_clicked.get("lng")), 6)
+        route_click_fingerprint = (rlat, rlon)
+        if route_click_fingerprint != st.session_state.get("_route_map_last_click"):
+          st.session_state["_route_map_last_click"] = route_click_fingerprint
+          try:
+            route_reverse = geolocator.reverse((rlat, rlon), timeout=2)
+            route_place = route_reverse.address if route_reverse and route_reverse.address else f"{rlat:.5f}, {rlon:.5f}"
+          except Exception:
+            route_place = f"{rlat:.5f}, {rlon:.5f}"
+
+          if route_map_target == "Başlangıç":
+            st.session_state["_pending_route_start_value"] = route_place
+            st.session_state["_pending_route_start"] = True
+          else:
+            st.session_state["_pending_route_end_value"] = route_place
+            st.session_state["_pending_route_end"] = True
+          st.session_state["route_map_selection_notice"] = route_place
+          st.rerun()
 
 
 # --- OPEN-METEO VERİ MOTORU ---
@@ -755,7 +802,10 @@ if search_button and search_query:
       st.session_state.zoom = 12
       st.session_state.son_arama = search_query
       st.session_state.location_label = location.address
-      st.session_state.search_input_val = search_query
+      st.session_state.search_input_val = location.address
+      # Widget key'i sonraki rerun'da, widget olusturulmadan once guncellenecek.
+      st.session_state["_pending_main_search_value"] = location.address
+      st.session_state["_pending_main_search"] = True
       st.success(f"Bulunan Konum: {location.address}")
       st.rerun()
     else:
@@ -800,7 +850,7 @@ folium.Marker(
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Global Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v31")
+map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v32_sync")
 
 # Haritaya Tıklama Durumu: Tıklanan yerin adresi çözülür ve arama kutusuna işlenir (1-2 saniye)
 if map_data:
@@ -815,7 +865,7 @@ if map_data:
       
       # Ters coğrafi kodlama ile tıklanan koordinatın yer adını buluyoruz
       try:
-        reverse_loc = geolocator.reverse((clicked_lat, clicked_lon), timeout=5)
+        reverse_loc = geolocator.reverse((clicked_lat, clicked_lon), timeout=2)
         if reverse_loc and reverse_loc.address:
           adres_str = reverse_loc.address
         else:
@@ -826,6 +876,9 @@ if map_data:
       st.session_state.location_label = adres_str
       st.session_state.search_input_val = adres_str
       st.session_state.son_arama = adres_str
+      # Widget key'i sonraki rerun'da, widget olusturulmadan once guncellenecek.
+      st.session_state["_pending_main_search_value"] = adres_str
+      st.session_state["_pending_main_search"] = True
       st.rerun()
 
 def degrees_to_cardinal(deg):
