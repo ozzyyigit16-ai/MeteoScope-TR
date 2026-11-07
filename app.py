@@ -357,9 +357,9 @@ else:
     t_fmt = pd.to_datetime(r['zaman']).strftime('%d %B %Y, Saat: %H:00')
     st.warning(f"⚠️ **{r['bolge']}** bölgesinde **{r['tip']}** ({r['deger']}) bekleniyor! | Zaman: **{t_fmt}**")
 
-st.markdown("Dünya haritası üzerinden global ölçekte nokta arayın, **bölge çizin (Polygon)**, canlı yağış radarını inceleyin veya **güzergah hava analizi** yapın.")
+st.markdown("Dünya haritası üzerinden arama yapın veya haritada dilediğiniz yere tıklayın. Arama kutusu ve harita anında senkronize olur.")
 
-geolocator = Nominatim(user_agent="meteo_app_global_expert_v5", timeout=5)
+geolocator = Nominatim(user_agent="meteo_app_global_expert_v6", timeout=5)
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -369,6 +369,8 @@ if "zoom" not in st.session_state:
   st.session_state.zoom = 10
 if "location_label" not in st.session_state:
   st.session_state.location_label = "İstanbul / Merkez"
+if "search_input_val" not in st.session_state:
+  st.session_state.search_input_val = "İstanbul"
 
 if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
@@ -549,7 +551,7 @@ if seyahat_acik:
             icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
         ).add_to(route_m)
 
-      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v4")
+      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v5")
 
 
 # --- OPEN-METEO VERİ MOTORU ---
@@ -729,13 +731,14 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
   return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-# --- GLOBAL ENTER DESTEKLİ ARAMA FORMU ---
+# --- 2 YÖNLÜ SENKRONİZE ARAMA FORMU ---
 with st.form(key="global_search_form", clear_on_submit=False):
   col1, col2 = st.columns([3, 1])
   with col1:
+    # Arama kutusu session_state ile reaktif olarak senkronize edilir
     search_query = st.text_input(
-        "🔍 Dünyanın Herhangi Bir Yerini Ara (Ülke, Şehir, Eyalet, Mahalle)",
-        placeholder="Örn: Tokyo, New York, Nairobi veya Sarıyer",
+        "🔍 Dünyanın Herhangi Bir Yerini Ara (Ülke, Şehir, Mahalle) veya Haritadan Seç",
+        value=st.session_state.search_input_val,
         key="main_search_input"
     )
   with col2:
@@ -752,17 +755,15 @@ if search_button and search_query:
       st.session_state.zoom = 12
       st.session_state.son_arama = search_query
       st.session_state.location_label = location.address
-      st.session_state.success_msg = f"Bulunan Global Konum: {location.address}"
+      st.session_state.search_input_val = search_query
+      st.success(f"Bulunan Konum: {location.address}")
       st.rerun()
     else:
-      st.error("Aradığınız konum küresel harita veritabanında bulunamadı. Lütfen farklı bir ifade deneyin.")
+      st.error("Aradığınız konum küresel harita veritabanında bulunamadı.")
   except Exception as e:
-    st.error(f"Global arama hatası: {e}")
+    st.error(f"Arama hatası: {e}")
 
-if "success_msg" in st.session_state:
-  st.success(st.session_state.pop("success_msg"))
-
-# --- KUSURSUZ HARİTA OLUŞTURMA (SESSION STATE BAĞIMLI) ---
+# --- KUSURSUZ İNTERAKTİF HARİTA (ÇİFT YÖNLÜ SENKRONİZASYON) ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
@@ -799,9 +800,9 @@ folium.Marker(
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Global Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v30")
+map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v31")
 
-# Harita Üzerine Tıklama ve Sürükleme Senkronizasyonu (Kusursuz Yakalama)
+# Haritaya Tıklama Durumu: Tıklanan yerin adresi çözülür ve arama kutusuna işlenir (1-2 saniye)
 if map_data:
   clicked = map_data.get("last_clicked")
   if clicked:
@@ -811,7 +812,20 @@ if map_data:
       st.session_state.lat = clicked_lat
       st.session_state.lon = clicked_lon
       st.session_state.zoom = map_data.get("zoom", st.session_state.zoom)
-      st.session_state.location_label = f"Koordinat: {clicked_lat:.4f}, {clicked_lon:.4f}"
+      
+      # Ters coğrafi kodlama ile tıklanan koordinatın yer adını buluyoruz
+      try:
+        reverse_loc = geolocator.reverse((clicked_lat, clicked_lon), timeout=5)
+        if reverse_loc and reverse_loc.address:
+          adres_str = reverse_loc.address
+        else:
+          adres_str = f"Enlem: {clicked_lat:.4f}, Boylam: {clicked_lon:.4f}"
+      except Exception:
+        adres_str = f"Enlem: {clicked_lat:.4f}, Boylam: {clicked_lon:.4f}"
+
+      st.session_state.location_label = adres_str
+      st.session_state.search_input_val = adres_str
+      st.session_state.son_arama = adres_str
       st.rerun()
 
 def degrees_to_cardinal(deg):
