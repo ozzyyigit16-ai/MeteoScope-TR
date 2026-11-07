@@ -359,7 +359,7 @@ else:
 
 st.markdown("Dünya haritası üzerinden global ölçekte nokta arayın, **bölge çizin (Polygon)**, canlı yağış radarını inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_global_expert_v4", timeout=5)
+geolocator = Nominatim(user_agent="meteo_app_global_expert_v5", timeout=5)
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -549,7 +549,7 @@ if seyahat_acik:
             icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
         ).add_to(route_m)
 
-      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v3")
+      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v4")
 
 
 # --- OPEN-METEO VERİ MOTORU ---
@@ -762,7 +762,7 @@ if search_button and search_query:
 if "success_msg" in st.session_state:
   st.success(st.session_state.pop("success_msg"))
 
-# --- KUSURSUZ VE HATASIZ OPENSTREETMAP STANDART HARİTASI ---
+# --- KUSURSUZ HARİTA OLUŞTURMA (SESSION STATE BAĞIMLI) ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
@@ -799,8 +799,9 @@ folium.Marker(
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Global Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v29")
+map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v30")
 
+# Harita Üzerine Tıklama ve Sürükleme Senkronizasyonu (Kusursuz Yakalama)
 if map_data:
   clicked = map_data.get("last_clicked")
   if clicked:
