@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from contextlib import contextmanager
 from geopy.geocoders import Nominatim
 import folium
-from folium.plugins import Draw
+from folium.plugins import Draw, Fullscreen, LocateControl
 from folium.raster_layers import TileLayer
 import pandas as pd
 import requests
@@ -167,24 +167,6 @@ def render_live_admin_metrics():
         value=st.session_state.get("son_arama", "İstanbul / Merkez"),
     )
     st.caption("Bu veriler sadece şifre bilen yöneticiler tarafından görülebilir.")
-
-
-# --- AKILLI GİYİM VE KAR ÖNERİSİ ---
-def giyim_onerisi_olustur(
-    ortalama_sicaklik, toplam_yagis, toplam_kar, ortalama_yagis_ihtimali, max_ruzgar
-):
-  if max_ruzgar > 45:
-    return "🌪️ **Giyim Önerisi:** Bölgede kuvvetli rüzgar ve fırtına hamleleri var. Rüzgarı kesen montlar tercih edin."
-  elif toplam_kar > 0.5 or ortalama_sicaklik <= 0:
-    return "❄️ **Giyim Önerisi:** Hava sıfırın altında ve sert soğuk hakim. Kalın kışlık mont ve botlarınızı giyin."
-  elif toplam_yagis > 1.0 or ortalama_yagis_ihtimali > 50:
-    return "🌧️ **Giyim Önerisi:** Yağış geçişleri var, yanınıza şemsiye alın."
-  elif ortalama_sicaklik < 12:
-    return "🧥 **Giyim Önerisi:** Hava oldukça soğuk, kat kat giyinin."
-  elif ortalama_sicaklik > 25:
-    return "👕 **Giyim Önerisi:** Hava sıcak, hafif kıyafetler tercih edebilirsiniz."
-  else:
-    return "👔 **Giyim Önerisi:** Hava mevsim normallerinde."
 
 
 # --- SAAT BAZLI KONUM TEHLİKE TARAMA MOTORU ---
@@ -359,9 +341,9 @@ else:
     t_fmt = pd.to_datetime(r['zaman']).strftime('%d %B %Y, Saat: %H:00')
     st.warning(f"⚠️ **{r['bolge']}** bölgesinde **{r['tip']}** ({r['deger']}) bekleniyor! | Zaman: **{t_fmt}**")
 
-st.markdown("Dünya haritası üzerinden nokta seçin, **bölge çizin (Polygon)**, canlı radarı inceleyin veya **güzergah hava analizi** yapın.")
+st.markdown("Dünya haritası üzerinden global ölçekte nokta arayın, **bölge çizin (Polygon)**, canlı yağış radarını inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_ITU_expert", timeout=3)
+geolocator = Nominatim(user_agent="meteo_app_global_expert_v2", timeout=5)
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -376,19 +358,19 @@ if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
 
 
-# --- SEYAHAT RİSK ANALİZİ ---
-seyahat_acik = st.toggle("🚗 İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", value=False, help="İstediğiniz zaman açıp kendi isteğinizle kapatabileceğiniz kalıcı seyahat analiz panelidir.")
+# --- GLOBAL SEYAHAT VE GÜZERGAH RİSK ANALİZİ ---
+seyahat_acik = st.toggle("🚗 Global İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", value=False, help="Dünyanın herhangi iki noktası arasında coğrafi mantık ve hava risklerini denetleyen profesyonel seyahat masası.")
 
 if seyahat_acik:
   with st.container(border=True):
-    st.markdown("### 🚗 Profesyonel ve Coğrafi Uyumlu Seyahat Analiz Masası")
-    st.markdown("Ulaşım türü ve seçtiğiniz konumların **gerçek dünya coğrafyasına uyumunu** denetleyen akıllı sistem ile güvenle seyahat edin.")
+    st.markdown("### 🚗 Profesyonel ve Coğrafi Uyumlu Global Seyahat Analiz Masası")
+    st.markdown("Dünyanın dilediğiniz iki noktası arasında güvenli seyahat planlayın.")
     
     col_g1, col_g2 = st.columns(2)
     with col_g1:
-      baslangic_yer = st.text_input("Başlangıç Konumu", placeholder="Örn: İstanbul", key="bas_yer")
+      baslangic_yer = st.text_input("Başlangıç Konumu (Global)", placeholder="Örn: Roma veya İstanbul", key="bas_yer")
     with col_g2:
-      bitis_yer = st.text_input("Varış Konumu", placeholder="Örn: Erzurum veya İzmir", key="bit_yer")
+      bitis_yer = st.text_input("Varış Konumu (Global)", placeholder="Örn: Madrid veya Ankara", key="bit_yer")
 
     col_t1, col_t2 = st.columns(2)
     with col_t1:
@@ -407,13 +389,13 @@ if seyahat_acik:
           max_value=max_tarih,
       )
 
-    rota_sorgula = st.button("Rotayı ve Coğrafi Mantığı Profesyonelce Analiz Et")
+    rota_sorgula = st.button("Global Rotayı ve Coğrafi Mantığı Analiz Et 🚀")
 
     if rota_sorgula and baslangic_yer and bitis_yer:
-      with st.spinner("Konumlar ve ulaşım araçları coğrafi mantık süzgecinden geçiriliyor..."):
+      with st.spinner("Küresel konum veritabanından noktalar çözümleniyor ve riskler taranıyor..."):
         try:
-          loc_b = geolocator.geocode(baslangic_yer, timeout=3)
-          loc_v = geolocator.geocode(bitis_yer, timeout=3)
+          loc_b = geolocator.geocode(baslangic_yer, timeout=5)
+          loc_v = geolocator.geocode(bitis_yer, timeout=5)
           if loc_b and loc_v:
             lat_b, lon_b = loc_b.latitude, loc_b.longitude
             lat_v, lon_v = loc_v.latitude, loc_v.longitude
@@ -421,9 +403,9 @@ if seyahat_acik:
 
             hata_mesaji = None
             if ulasim_turu.startswith("Gemi") and mesafe_km < 30:
-              hata_mesaji = f"❌ **Coğrafi Hata:** Seçtiğiniz konumlar arasındaki mesafe ({mesafe_km:.1f} km) gemi seferi için uygun değil."
-            elif ulasim_turu.startswith("Özel Araç") and mesafe_km > 5000:
-              hata_mesaji = f"❌ **Coğrafi Hata:** Mesafe ({mesafe_km:,.0f} km) karayoluyla geçilemeyecek kadar uzaktır."
+              hata_mesaji = f"❌ **Coğrafi Hata:** Seçtiğiniz konumlar arasındaki mesafe ({mesafe_km:.1f} km) gemi seferi için çok kısa."
+            elif ulasim_turu.startswith("Özel Araç") and mesafe_km > 8000:
+              hata_mesaji = f"❌ **Coğrafi Hata:** Mesafe ({mesafe_km:,.0f} km) kıtalar arası veya karayoluyla geçilemeyecek kadar uzaktır."
             elif ulasim_turu.startswith("Uçak") and mesafe_km < 80:
               hata_mesaji = f"❌ **Coğrafi Hata:** Mesafe ({mesafe_km:.1f} km) uçuş için çok kısadır."
 
@@ -467,10 +449,10 @@ if seyahat_acik:
               durum_kodu = "yesil"
 
               point_records = [
-                  {"name": f"Kalkış: {baslangic_yer}", "lat": lat_b, "lon": lon_b, "data": res_b},
-                  {"name": f"Yol Üstü Geçiş 1", "lat": lat_mid1, "lon": lon_mid1, "data": res_m1},
-                  {"name": f"Yol Üstü Geçiş 2", "lat": lat_mid2, "lon": lon_mid2, "data": res_m2},
-                  {"name": f"Varış: {bitis_yer}", "lat": lat_v, "lon": lon_v, "data": res_v}
+                  {"name": f"Kalkış: {loc_b.address}", "lat": lat_b, "lon": lon_b, "data": res_b},
+                  {"name": f"Yol Üstü Ara Geçiş 1", "lat": lat_mid1, "lon": lon_mid1, "data": res_m1},
+                  {"name": f"Yol Üstü Ara Geçiş 2", "lat": lat_mid2, "lon": lon_mid2, "data": res_m2},
+                  {"name": f"Varış: {loc_v.address}", "lat": lat_v, "lon": lon_v, "data": res_v}
               ]
 
               for p in point_records:
@@ -513,21 +495,45 @@ if seyahat_acik:
                 })
 
               st.session_state.route_map_data = {
-                  "bas_ad": baslangic_yer, "bit_ad": bitis_yer,
+                  "bas_ad": loc_b.address, "bit_ad": loc_v.address,
                   "lat_b": lat_b, "lon_b": lon_b, "lat_v": lat_v, "lon_v": lon_v,
                   "markers": markers_for_route_map, "report_table": detailed_written_report,
                   "durum": durum_kodu, "tarih": planlanan_tarih.strftime('%d.%m.%Y')
               }
           else:
-            st.error("Girilen başlangıç veya varış konumu haritada bulunamadı.")
+            st.error("Girilen başlangıç veya varış konumu küresel haritada bulunamadı.")
         except Exception as e:
-          st.error(f"Güzergah analiz hatası: {e}")
+          st.error(f"Global güzergah analiz hatası: {e}")
 
     if st.session_state.get("route_map_data"):
       r_info = st.session_state.route_map_data
-      st.markdown(f"### 📋 Rota Detaylı Yazılı Risk ve Konum Raporu ({r_info['bas_ad']} ➡️ {r_info['bit_ad']})")
+      st.markdown(f"### 📋 Rota Detaylı Yazılı Risk Raporu")
       report_df = pd.DataFrame(r_info["report_table"])
       st.dataframe(report_df, use_container_width=True, hide_index=True)
+
+      st.markdown(f"### 🗺️ Global Güzergah Haritası")
+      mid_lat = (r_info["lat_b"] + r_info["lat_v"]) / 2
+      mid_lon = (r_info["lon_b"] + r_info["lon_v"]) / 2
+      
+      route_m = folium.Map(location=[mid_lat, mid_lon], zoom_start=5, tiles="CartoDB positron")
+      Fullscreen().add_to(route_m)
+      LocateControl().add_to(route_m)
+
+      poly_pts = [(m["lat"], m["lon"]) for m in r_info["markers"]]
+      folium.PolyLine(poly_pts, color="#ff4b4b", weight=5, opacity=0.85, tooltip="Güzergah Koridoru").add_to(route_m)
+
+      for m_item in r_info["markers"]:
+        c_color = "red" if m_item["risk"] else "green"
+        c_icon = "warning-sign" if m_item["risk"] else "ok-sign"
+        popup_html = f"<b>{m_item['name']}</b><br>{m_item['desc']}"
+        folium.Marker(
+            [m_item["lat"], m_item["lon"]],
+            popup=folium.Popup(popup_html, max_width=320),
+            tooltip=m_item["name"],
+            icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
+        ).add_to(route_m)
+
+      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v1")
 
 
 # --- OPEN-METEO VERİ MOTORU ---
@@ -707,41 +713,48 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
   return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-# --- ARAMA FORMU ---
-with st.form(key="search_form", clear_on_submit=False):
+# --- GLOBAL ENTER DESTEKLİ ARAMA FORMU ---
+with st.form(key="global_search_form", clear_on_submit=False):
   col1, col2 = st.columns([3, 1])
   with col1:
-    search_query = st.text_input("🔍 Konum Ara (Ülke, Şehir, İlçe, Mahalle)", placeholder="Örn: Sarıyer, İstanbul veya Ankara", key="main_search_input")
+    search_query = st.text_input(
+        "🔍 Dünyanın Herhangi Bir Yerini Ara (Ülke, Şehir, Eyalet, Mahalle)",
+        placeholder="Örn: Tokyo, New York, Nairobi veya Sarıyer",
+        key="main_search_input"
+    )
   with col2:
     st.write("")
     st.write("")
-    search_button = st.form_submit_button("Konuma Git 🚀")
+    search_button = st.form_submit_button("Global Konuma Git 🚀")
 
 if search_button and search_query:
   try:
-    location = geolocator.geocode(search_query, timeout=3)
+    location = geolocator.geocode(search_query, timeout=5)
     if location:
       st.session_state.lat = location.latitude
       st.session_state.lon = location.longitude
       st.session_state.zoom = 12
       st.session_state.son_arama = search_query
       st.session_state.location_label = location.address
-      st.session_state.success_msg = f"Bulunan Konum: {location.address}"
+      st.session_state.success_msg = f"Bulunan Global Konum: {location.address}"
       st.rerun()
     else:
-      st.error("Aradığınız konum bulunamadı.")
+      st.error("Aradığınız konum küresel harita veritabanında bulunamadı. Lütfen farklı bir ifade deneyin.")
   except Exception as e:
-    st.error(f"Arama hatası: {e}")
+    st.error(f"Global arama hatası: {e}")
 
 if "success_msg" in st.session_state:
   st.success(st.session_state.pop("success_msg"))
 
-# --- KUSURSUZ HARİTA SENRONİZASYONU ---
+# --- PROFESYONEL GLOBAL HARİTA ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
-    tiles="OpenStreetMap",
+    tiles="CartoDB positron",
 )
+
+Fullscreen(position="topright").add_to(m)
+LocateControl(position="topleft", strings={"title": "Konumuma Git"}).add_to(m)
 
 radar_layer = TileLayer(
     tiles="https://tile.rainviewer.com/v2/radar/nowcast_120/{z}/{x}/{y}/2/1_1.png",
@@ -763,16 +776,15 @@ Draw(
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
     popup=st.session_state.get('location_label', 'Seçilen Konum'),
-    tooltip="Aktif Konum",
+    tooltip="Aktif Global Konum",
     icon=folium.Icon(color="red", icon="cloud"),
 ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
-st.subheader("📍 İnteraktif Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=480, key="meteoscope_main_map_v25")
+st.subheader("📍 İnteraktif Global Harita ve Konum Analizi")
+map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v27")
 
-# Harita etkileşimlerini güvenli okuma (Arama sonrası çakışmayı önleyen korumalı blok)
 if map_data:
   clicked = map_data.get("last_clicked")
   if clicked:
@@ -782,7 +794,7 @@ if map_data:
       st.session_state.lat = clicked_lat
       st.session_state.lon = clicked_lon
       st.session_state.zoom = map_data.get("zoom", st.session_state.zoom)
-      st.session_state.location_label = "Harita üzerinde seçilen nokta"
+      st.session_state.location_label = f"Koordinat: {clicked_lat:.4f}, {clicked_lon:.4f}"
       st.rerun()
 
 def degrees_to_cardinal(deg):
@@ -797,7 +809,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
   weather_error = None
   used_fallback_data = False
-  with st.spinner("Modeller taranıyor ve hassas veriler hesaplanıyor..."):
+  with st.spinner("Küresel hava modelleri taranıyor..."):
     try:
       request_lat = float(st.session_state.lat)
       request_lon = float(st.session_state.lon)
@@ -843,7 +855,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
     saatlik_tehlikeler = konum_saatlik_tehlike_taramasi(df)
     
     if not saatlik_tehlikeler:
-      st.success("🟢 **Saat Bazlı Durum Stabil:** Seçilen konum için 7 günlük periyotta model verilerinde kritik bir saatlik eşik aşımı tespit edilmemiştir.")
+      st.success("🟢 **Saat Bazlı Durum Stabil:** Seçilen konum için önümüzdeki periyotta model verilerinde kritik bir saatlik eşik aşımı tespit edilmemiştir.")
     else:
       st.warning(f"⚠️ **DİKKAT! Model verilerine göre bu konumda kritik eşikleri aşan {len(saatlik_tehlikeler)} adet tehlikeli saat dilimi tespit edildi:**")
       saatlik_tablo_verisi = []
@@ -881,13 +893,13 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         d_wind = day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else 0
 
         if max_hourly_p >= 7.0:
-          yagis_durum_str = f"🔴 Şiddetli Sağanak ({d_precip:.1f} mm / Max Saatlik: {max_hourly_p:.1f} mm)"
+          yagis_durum_str = f"🔴 Şiddetli Sağanak (Toplam: {d_precip:.1f} mm | Max Saatlik: {max_hourly_p:.1f} mm/s)"
         elif max_hourly_p >= 5.0:
-          yagis_durum_str = f"🟠 Kuvvetli Yağış ({d_precip:.1f} mm)"
+          yagis_durum_str = f"🟠 Kuvvetli Yağış (Toplam: {d_precip:.1f} mm)"
         elif d_precip > 1.0:
-          yagis_durum_str = f"🟡 Normal / Hafif Yağış ({d_precip:.1f} mm)"
+          yagis_durum_str = f"🟡 Normal / Hafif Yağış (Toplam: {d_precip:.1f} mm)"
         else:
-          yagis_durum_str = "🟢 Yağış İhtimali Düşük"
+          yagis_durum_str = f"🟢 Yağış İhtimali Düşük (Toplam: {d_precip:.1f} mm)"
 
         gun_ismi = pd.to_datetime(d).strftime('%A')
         gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
@@ -896,7 +908,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
           with st.container(border=True):
             st.markdown(f"**📌 {d} ({gun_tr})**")
             st.metric(label="Min / Max Sıcaklık", value=f"{d_min_t:.1f}°C / {d_max_t:.1f}°C")
-            st.metric(label="Şiddet & Toplam Yağış", value=yagis_durum_str)
+            st.metric(label="Şiddet & mm Yağış Beklentisi", value=yagis_durum_str)
             st.metric(label="Max Rüzgar Hamlesi", value=f"{d_wind:.1f} km/s")
 
     if current_data:
@@ -912,7 +924,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
     st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "🤝 3'lü Model Konsensüsü", "🕰️ Geçmiş Arşiv", "📄 Otomatik Uzman Raporu",
+        "🤝 3'lü Model Konsensüsü", "🕰️ Geçmiş Arşiv", "📄 Uzman Bülteni",
         "🌡️ Sıcaklık & Nem", "💨 Hassas Rüzgar & Hamle", "☁️ Basınç & Bulut",
         "❄️ Yağış, Kar & Olasılık", "📋 7 Günlük Hava Özeti & İndirme",
     ])
@@ -931,16 +943,24 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.info("Arşiv verisi bulunamadı.")
 
     with tab3:
-      st.subheader("📄 Otomatik Meteorolojik Durum Raporu")
+      st.subheader("📄 Meteoroloji Uzmanı Analiz Bülteni (Salt Okunur)")
       t_all = [c for c in df_3days.columns if "temperature_2m" in c]
       rep_min = df_3days[t_all].min().min() if t_all else 0
       rep_max = df_3days[t_all].max().max() if t_all else 0
       rep_precip = df_3days["precipitation"].sum() if "precipitation" in df_3days.columns else 0
-      rep_snow = df_3days["snowfall"].sum() if "snowfall" in df_3days.columns else 0
       rep_wind = df_3days["wind_speed_10m"].max() if "wind_speed_10m" in df_3days.columns else 0
+      
+      # Uzman gözünden kilitli bülten kartı (Kullanıcı değiştiremez)
+      with st.container(border=True):
+        st.markdown(f"**Konum Koordinatları:** Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}")
+        st.markdown(f"**Anlık Sıcaklık:** {current_data.get('temperature_2m', 0.0):.1f} °C")
+        st.markdown(f"**Önümüzdeki 3 Gün Toplam Yağış Beklentisi:** {rep_precip:.1f} mm")
+        st.markdown(f"**Maksimum Rüzgar Hızı:** {rep_wind:.1f} km/s")
+        st.markdown("---")
+        st.info("💡 **Uzman Notu:** Bu bülten küresel sayısal hava tahmin modellerinin (ECMWF, GFS, ICON) sentezlenmesiyle otomatik olarak oluşturulmuştur ve salt okunurdur.")
+      
       report_text = f"METEOROLOJİK UZMAN RAPORU\nKonum: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}\nSıcaklık: {current_data.get('temperature_2m', 0.0):.1f}°C\nToplam Yağış (3 Gün): {rep_precip:.1f} mm\nMax Rüzgar: {rep_wind:.1f} km/s"
-      st.text_area("Rapor Önizlemesi", report_text, height=200)
-      st.download_button("📥 Raporu İndir", report_text.encode("utf-8"), file_name="meteo_report.txt", mime="text/plain")
+      st.download_button("📥 Uzman Bültenini İndir", report_text.encode("utf-8"), file_name="meteo_expert_report.txt", mime="text/plain")
 
     with tab4: st.line_chart(df.set_index("time")[[c for c in df.columns if "temperature_2m" in c or "relative_humidity_2m" in c]])
     with tab5: st.line_chart(df.set_index("time")[[c for c in df.columns if "speed" in c or "gusts" in c]])
