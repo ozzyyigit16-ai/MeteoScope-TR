@@ -169,6 +169,22 @@ def render_live_admin_metrics():
     st.caption("Bu veriler sadece şifre bilen yöneticiler tarafından görülebilir.")
 
 
+# --- AKILLI GİYİM ÖNERİSİ MOTORU ---
+def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, max_ruzgar):
+  if max_ruzgar > 45:
+    return "🌪️ **Giyim Önerisi:** Bölgede kuvvetli rüzgar ve fırtına hamleleri var. Rüzgarı kesen montlar tercih edin."
+  elif toplam_kar > 0.5 or ortalama_sicaklik <= 0:
+    return "❄️ **Giyim Önerisi:** Hava sıfırın altında ve sert soğuk hakim. Kalın kışlık mont ve botlarınızı giyin."
+  elif toplam_yagis > 1.0:
+    return "🌧️ **Giyim Önerisi:** Yağış geçişleri var, yanınıza şemsiye alın."
+  elif ortalama_sicaklik < 12:
+    return "🧥 **Giyim Önerisi:** Hava oldukça soğuk, kat kat giyinin."
+  elif ortalama_sicaklik > 25:
+    return "👕 **Giyim Önerisi:** Hava sıcak, hafif kıyafetler tercih edebilirsiniz."
+  else:
+    return "👔 **Giyim Önerisi:** Hava mevsim normallerinde."
+
+
 # --- SAAT BAZLI KONUM TEHLİKE TARAMA MOTORU ---
 def konum_saatlik_tehlike_taramasi(df):
   if df.empty or "time" not in df.columns:
@@ -343,7 +359,7 @@ else:
 
 st.markdown("Dünya haritası üzerinden global ölçekte nokta arayın, **bölge çizin (Polygon)**, canlı yağış radarını inceleyin veya **güzergah hava analizi** yapın.")
 
-geolocator = Nominatim(user_agent="meteo_app_global_expert_v2", timeout=5)
+geolocator = Nominatim(user_agent="meteo_app_global_expert_v4", timeout=5)
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -515,7 +531,7 @@ if seyahat_acik:
       mid_lat = (r_info["lat_b"] + r_info["lat_v"]) / 2
       mid_lon = (r_info["lon_b"] + r_info["lon_v"]) / 2
       
-      route_m = folium.Map(location=[mid_lat, mid_lon], zoom_start=5, tiles="CartoDB positron")
+      route_m = folium.Map(location=[mid_lat, mid_lon], zoom_start=5, tiles="OpenStreetMap")
       Fullscreen().add_to(route_m)
       LocateControl().add_to(route_m)
 
@@ -533,7 +549,7 @@ if seyahat_acik:
             icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
         ).add_to(route_m)
 
-      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v1")
+      st_folium(route_m, width="100%", height=450, key="global_route_map_view_v3")
 
 
 # --- OPEN-METEO VERİ MOTORU ---
@@ -746,11 +762,11 @@ if search_button and search_query:
 if "success_msg" in st.session_state:
   st.success(st.session_state.pop("success_msg"))
 
-# --- PROFESYONEL GLOBAL HARİTA ---
+# --- KUSURSUZ VE HATASIZ OPENSTREETMAP STANDART HARİTASI ---
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
-    tiles="CartoDB positron",
+    tiles="OpenStreetMap",
 )
 
 Fullscreen(position="topright").add_to(m)
@@ -783,7 +799,7 @@ folium.Marker(
 folium.LayerControl().add_to(m)
 
 st.subheader("📍 İnteraktif Global Harita ve Konum Analizi")
-map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v27")
+map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_map_v29")
 
 if map_data:
   clicked = map_data.get("last_clicked")
@@ -948,18 +964,27 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       rep_min = df_3days[t_all].min().min() if t_all else 0
       rep_max = df_3days[t_all].max().max() if t_all else 0
       rep_precip = df_3days["precipitation"].sum() if "precipitation" in df_3days.columns else 0
+      rep_snow = df_3days["snowfall"].sum() if "snowfall" in df_3days.columns else 0
       rep_wind = df_3days["wind_speed_10m"].max() if "wind_speed_10m" in df_3days.columns else 0
       
-      # Uzman gözünden kilitli bülten kartı (Kullanıcı değiştiremez)
+      giyim_tavsiyesi = giyim_onerisi_olustur(
+          current_data.get('temperature_2m', 15),
+          rep_precip,
+          rep_snow,
+          rep_wind
+      )
+      
       with st.container(border=True):
         st.markdown(f"**Konum Koordinatları:** Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}")
         st.markdown(f"**Anlık Sıcaklık:** {current_data.get('temperature_2m', 0.0):.1f} °C")
         st.markdown(f"**Önümüzdeki 3 Gün Toplam Yağış Beklentisi:** {rep_precip:.1f} mm")
         st.markdown(f"**Maksimum Rüzgar Hızı:** {rep_wind:.1f} km/s")
         st.markdown("---")
+        st.markdown(giyim_tavsiyesi)
+        st.markdown("---")
         st.info("💡 **Uzman Notu:** Bu bülten küresel sayısal hava tahmin modellerinin (ECMWF, GFS, ICON) sentezlenmesiyle otomatik olarak oluşturulmuştur ve salt okunurdur.")
       
-      report_text = f"METEOROLOJİK UZMAN RAPORU\nKonum: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}\nSıcaklık: {current_data.get('temperature_2m', 0.0):.1f}°C\nToplam Yağış (3 Gün): {rep_precip:.1f} mm\nMax Rüzgar: {rep_wind:.1f} km/s"
+      report_text = f"METEOROLOJİK UZMAN RAPORU\nKonum: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}\nSıcaklık: {current_data.get('temperature_2m', 0.0):.1f}°C\nToplam Yağış (3 Gün): {rep_precip:.1f} mm\nMax Rüzgar: {rep_wind:.1f} km/s\n\n{giyim_tavsiyesi}"
       st.download_button("📥 Uzman Bültenini İndir", report_text.encode("utf-8"), file_name="meteo_expert_report.txt", mime="text/plain")
 
     with tab4: st.line_chart(df.set_index("time")[[c for c in df.columns if "temperature_2m" in c or "relative_humidity_2m" in c]])
