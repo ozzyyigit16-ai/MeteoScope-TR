@@ -374,6 +374,9 @@ if "search_input_val" not in st.session_state:
 
 if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
+# Eski sürümün oturum state verisi yeni rapor şemasıyla uyumlu değilse temizle.
+if st.session_state.get("route_map_data") and "route_geometry" not in st.session_state.route_map_data:
+  st.session_state.route_map_data = None
 
 # Harita seciminden gelen metinleri widget olusturulmadan once uygula.
 # Bu, Streamlit'in widget olusturulduktan sonra session_state degistirme
@@ -391,213 +394,319 @@ if st.session_state.pop("_pending_route_end", None) is not None:
   st.session_state.pop("_pending_route_end_value", None)
 
 
-# --- GLOBAL SEYAHAT VE GÜZERGAH RİSK ANALİZİ ---
-seyahat_acik = st.toggle("🚗 Global İki Konum Arası Detaylı Güzergah & Yol Üstü Risk Analizi", value=False, help="Dünyanın herhangi iki noktası arasında coğrafi mantık ve hava risklerini denetleyen profesyonel seyahat masası.")
+# --- TÜRKİYE İÇİ AKILLI SEYAHAT / GÜZERGÂH ANALİZİ ---
+# Ulaşım bağlantı bilgileri kontrollü bir başlangıç ağıdır. Sefer saatleri/koltuk
+# uygunluğu değildir; uygulama bunları doğrulanmış canlı sefer gibi sunmaz.
+# Şehirler arası demiryolu ağı: hat/koridor ilişkileri (sefer saati veya
+# güncel bilet bulunabilirliği anlamına gelmez). BFS, ara bağlantıları da bulur.
+TR_RAIL_CORRIDORS = [
+    ["istanbul", "kocaeli", "sakarya", "bilecik", "eskisehir", "ankara"],
+    ["ankara", "eskisehir", "kutahya", "afyon", "usak", "manisa", "izmir"],
+    ["ankara", "konya", "karaman"],
+    ["istanbul", "eskisehir", "konya"],
+    ["ankara", "kirikkale", "yozgat", "sivas"],
+    ["ankara", "kayseri", "sivas"],
+    ["ankara", "adana", "mersin"],
+    ["izmir", "manisa", "balikesir", "bandirma"],
+    ["istanbul", "bandirma"],
+    ["ankara", "zonguldak"],
+    ["ankara", "erzurum", "kars"],
+    ["ankara", "diyarbakir"],
+    ["ankara", "malatya", "elazig", "diyarbakir"],
+    ["mersin", "tarsus", "adana", "osmaniye", "gaziantep"],
+]
+TR_RAIL_LINKS = set()
+TR_RAIL_GRAPH = {}
+for _corridor in TR_RAIL_CORRIDORS:
+    for _i in range(len(_corridor)-1):
+        _a, _b = _corridor[_i], _corridor[_i+1]
+        TR_RAIL_LINKS.add(frozenset((_a, _b)))
+        TR_RAIL_GRAPH.setdefault(_a, set()).add(_b)
+        TR_RAIL_GRAPH.setdefault(_b, set()).add(_a)
+
+def _tr_rail_path(start, end):
+    """Return a city path in the known rail corridor graph, or None."""
+    if start == end:
+        return [start]
+    from collections import deque
+    queue = deque([[start]])
+    visited = {start}
+    while queue:
+        path = queue.popleft()
+        for nxt in TR_RAIL_GRAPH.get(path[-1], ()):
+            if nxt == end:
+                return path + [nxt]
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append(path + [nxt])
+    return None
+TR_AIRPORT_CITIES = {
+    "istanbul", "ankara", "izmir", "antalya", "adana", "mersin", "gaziantep",
+    "diyarbakir", "van", "trabzon", "samsun", "erzurum", "kayseri", "konya",
+    "eskisehir", "malatya", "elazig", "batman", "mardin", "bodrum", "dalaman",
+    "rize", "ordu", "tokat", "sivas", "denizli", "hatay", "kahramanmaras",
+    "sanliurfa", "igdir", "kars", "agri", "canakkale", "balikesir", "mus",
+    "sirnak", "tekirdag", "zonguldak", "sinop", "kastamonu", "corum", "amasya",
+    "usak", "afyon", "isparta", "burdur", "bursa", "yalova", "kocaeli",
+}
+TR_FERRY_LINKS = {
+    frozenset(x) for x in [
+        ("istanbul", "yalova"), ("istanbul", "bandirma"), ("istanbul", "bursa"),
+        ("istanbul", "tekirdag"), ("yalova", "pendik"), ("yalova", "gebze"),
+        ("canakkale", "gelibolu"), ("canakkale", "eceabat"),
+        ("izmir", "karsiyaka"), ("izmir", "bostanli"), ("mersin", "tashucu"),
+        ("antalya", "kas"), ("bodrum", "datca"), ("bodrum", "kos"),
+    ]
+}
+
+def _tr_norm(text):
+    import unicodedata
+    text = (text or "").lower().replace("ı", "i").replace("İ", "i")
+    text = text.replace("ş", "s").replace("ğ", "g").replace("ü", "u").replace("ö", "o").replace("ç", "c")
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+def _tr_place_tokens(loc):
+    # Nominatim address field may contain city, province and district. Match a
+    # known city token only; do not infer a transport connection from distance.
+    raw = _tr_norm(getattr(loc, "address", ""))
+    aliases = {
+        "istanbul": ["istanbul"], "ankara": ["ankara"], "izmir": ["izmir"],
+        "eskisehir": ["eskisehir"], "konya": ["konya"], "sivas": ["sivas"],
+        "karaman": ["karaman"], "kayseri": ["kayseri"], "adana": ["adana"],
+        "mersin": ["mersin", "icel"], "balikesir": ["balikesir"],
+        "bandirma": ["bandirma"], "manisa": ["manisa"], "antalya": ["antalya"],
+        "gaziantep": ["gaziantep"], "diyarbakir": ["diyarbakir"], "van": ["van"],
+        "trabzon": ["trabzon"], "samsun": ["samsun"], "erzurum": ["erzurum"],
+        "bursa": ["bursa"], "yalova": ["yalova"], "kocaeli": ["kocaeli", "izmit"],
+        "canakkale": ["canakkale"], "tekirdag": ["tekirdag"], "bodrum": ["bodrum"],
+        "datca": ["datca"], "gelibolu": ["gelibolu"], "eceabat": ["eceabat"],
+        "sakarya": ["sakarya", "adapazari"], "bilecik": ["bilecik"],
+        "kutahya": ["kutahya"], "afyon": ["afyon", "afyonkarahisar"],
+        "usak": ["usak"], "kirikkale": ["kirikkale"], "yozgat": ["yozgat"],
+        "zonguldak": ["zonguldak"], "kars": ["kars"], "malatya": ["malatya"],
+        "elazig": ["elazig"], "osmaniye": ["osmaniye"], "tarsus": ["tarsus"],
+        "pendik": ["pendik"], "gebze": ["gebze"], "tashucu": ["tasucu", "tashucu"],
+        "karsiyaka": ["karsiyaka"], "bostanli": ["bostanli"], "kas": ["kas"],
+    }
+    found=[]
+    for canonical, names in aliases.items():
+        if any(name in raw for name in names):
+            found.append(canonical)
+    return found
+
+def _tr_mode_availability(mode, loc_b, loc_v, dist_km):
+    a, b = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
+    if not a or not b:
+        return None, "Konumlar Türkiye içinde çözümlendi ancak şehir/hat eşleşmesi yapılamadı. Ulaşım uygunluğu kesin doğrulanamadı."
+    if mode == "Uçak":
+        if a[0] in TR_AIRPORT_CITIES and b[0] in TR_AIRPORT_CITIES and dist_km >= 150:
+            return True, "Her iki uç noktada da havalimanı/şehir eşleşmesi var. Bu, seçilen tarihte direkt uçuş veya bilet bulunduğunu garanti etmez."
+        return False, "Uçak için iki uçta da uygun havalimanı eşleşmesi ve makul şehirler arası mesafe doğrulanamadı."
+    if mode == "Tren":
+        rail_path = _tr_rail_path(a[0], b[0])
+        if rail_path:
+            if len(rail_path) == 2:
+                return True, "Bilinen demiryolu koridorunda bağlantı eşleşmesi var. Bu, seçilen tarihte sefer veya bilet bulunduğunu garanti etmez."
+            transfer_names = " → ".join(rail_path[1:-1])
+            return True, f"Bilinen demiryolu koridoru üzerinden bağlantı yolu bulundu (ara şehirler: {transfer_names}). Bu, aktarmalı seferin seçilen tarihte çalıştığını garanti etmez."
+        return False, "Türkiye içindeki bilinen demiryolu koridoru ağında bu iki şehir arasında bağlantı bulunamadı."
+    if mode == "Deniz yolu":
+        if frozenset((a[0], b[0])) in TR_FERRY_LINKS or a[0] == b[0]:
+            return True, "Bilinen yolcu feribotu/deniz bağlantısı eşleşmesi var; seferin seçilen tarihte çalıştığı ayrıca doğrulanmalıdır."
+        return False, "Bu iki şehir arasında bilinen doğrudan yolcu deniz bağlantısı eşleşmedi."
+    return True, "Karayolu bağlantısı OSRM yol ağı üzerinden ayrıca sorgulanacak."
+
+seyahat_acik = st.toggle("🚗 Türkiye İçi Akıllı Güzergâh & Yol Üstü Risk Analizi", value=False,
+    help="Türkiye içi karayolu rotası, ulaşım türü uygunluğu ve seçilen tarihe yönelik hava risklerini analiz eder.")
 
 if seyahat_acik:
   with st.container(border=True):
-    st.markdown("### 🚗 Profesyonel ve Coğrafi Uyumlu Global Seyahat Analiz Masası")
-    st.markdown("Dünyanın dilediğiniz iki noktası arasında güvenli seyahat planlayın.")
-    
-    # Harita tiklamasi rota alanlarindan hangisini guncellesin?
-    route_map_target = st.radio(
-        "Güzergâh haritasına tıklayınca hangi konum güncellensin?",
-        ["Başlangıç", "Varış"], horizontal=True, key="route_map_target"
-    )
+    st.markdown("### 🇹🇷 Türkiye İçi Akıllı Seyahat Planlama")
+    st.caption("Türkiye içi şehir/hat ağı kontrolü yapılır. Bu sürüm sefer saati, koltuk veya bilet uygunluğunu canlı doğrulamaz; haritadaki tren/uçak/deniz çizgileri şematiktir.")
 
+    route_map_target = st.radio("Güzergâh haritasına tıklayınca hangi konum güncellensin?",
+        ["Başlangıç", "Varış"], horizontal=True, key="route_map_target")
     col_g1, col_g2 = st.columns(2)
     with col_g1:
-      baslangic_yer = st.text_input("Başlangıç Konumu (Global)", placeholder="Örn: Roma veya İstanbul", key="bas_yer")
+      baslangic_yer = st.text_input("Başlangıç (Türkiye)", placeholder="Örn: İstanbul, Kadıköy", key="bas_yer")
     with col_g2:
-      bitis_yer = st.text_input("Varış Konumu (Global)", placeholder="Örn: Madrid veya Ankara", key="bit_yer")
+      bitis_yer = st.text_input("Varış (Türkiye)", placeholder="Örn: Kocaeli, İzmit", key="bit_yer")
 
     col_t1, col_t2 = st.columns(2)
     with col_t1:
-      ulasim_turu = st.selectbox(
-          "Seçilen Ulaşım Aracı",
-          ["Özel Araç / Otobüs (Kara Yolu)", "Uçak (Hava Yolu)", "Gemi / Feribot (Deniz Yolu)"],
-          index=0
-      )
+      ulasim_turu = st.selectbox("Seyahat türü", ["Özel araç", "Otobüs", "Uçak", "Deniz yolu", "Tren"], key="route_transport_mode")
     with col_t2:
-      bugun_tarih = date.today()
-      max_tarih = bugun_tarih + timedelta(days=7)
-      planlanan_tarih = st.date_input(
-          "Planlanan Seyahat Tarihi (Max 7 Gün Sınırı)",
-          value=bugun_tarih,
-          min_value=bugun_tarih,
-          max_value=max_tarih,
-      )
+      today_route = date.today()
+      route_max_date = today_route + timedelta(days=16)
+      planlanan_tarih = st.date_input("Planlanan seyahat tarihi", value=today_route,
+          min_value=today_route, max_value=route_max_date, key="route_travel_date",
+          help="Hava tahmini için Open-Meteo'nun desteklediği yakın dönem aralığıyla sınırlıdır.")
 
-    rota_sorgula = st.button("Global Rotayı ve Coğrafi Mantığı Analiz Et 🚀")
+    rota_sorgula = st.button("Türkiye Rotasını ve Ulaşım Uygunluğunu Analiz Et 🇹🇷", type="primary")
 
-    if rota_sorgula and baslangic_yer and bitis_yer:
-      with st.spinner("Küresel konum veritabanından noktalar çözümleniyor ve riskler taranıyor..."):
-        try:
-          loc_b = geolocator.geocode(baslangic_yer, timeout=5)
-          loc_v = geolocator.geocode(bitis_yer, timeout=5)
-          if loc_b and loc_v:
-            lat_b, lon_b = loc_b.latitude, loc_b.longitude
-            lat_v, lon_v = loc_v.latitude, loc_v.longitude
-            mesafe_km = geodesic((lat_b, lon_b), (lat_v, lon_v)).km
-
-            hata_mesaji = None
-            if ulasim_turu.startswith("Gemi") and mesafe_km < 30:
-              hata_mesaji = f"❌ **Coğrafi Hata:** Seçtiğiniz konumlar arasındaki mesafe ({mesafe_km:.1f} km) gemi seferi için çok kısa."
-            elif ulasim_turu.startswith("Özel Araç") and mesafe_km > 8000:
-              hata_mesaji = f"❌ **Coğrafi Hata:** Mesafe ({mesafe_km:,.0f} km) kıtalar arası veya karayoluyla geçilemeyecek kadar uzaktır."
-            elif ulasim_turu.startswith("Uçak") and mesafe_km < 80:
-              hata_mesaji = f"❌ **Coğrafi Hata:** Mesafe ({mesafe_km:.1f} km) uçuş için çok kısadır."
-
-            if hata_mesaji:
-              st.error(hata_mesaji)
+    if rota_sorgula:
+      if not baslangic_yer.strip() or not bitis_yer.strip():
+        st.warning("Lütfen başlangıç ve varış konumlarını gir.")
+      elif _tr_norm(baslangic_yer) == _tr_norm(bitis_yer):
+        st.warning("Başlangıç ve varış aynı görünüyor. Farklı konumlar gir.")
+      else:
+        with st.spinner("Türkiye içindeki konumlar, ulaşım bağlantıları ve rota ağı kontrol ediliyor..."):
+          try:
+            loc_b = geolocator.geocode(baslangic_yer, country_codes="tr", timeout=8)
+            loc_v = geolocator.geocode(bitis_yer, country_codes="tr", timeout=8)
+            if not loc_b or not loc_v:
+              st.error("Başlangıç veya varış Türkiye içinde bulunamadı. İl/ilçe adıyla tekrar deneyin.")
             else:
-              d_lat = lat_v - lat_b
-              d_lon = lon_v - lon_b
-              lat_mid1 = lat_b + d_lat * 0.33
-              lon_mid1 = lon_b + d_lon * 0.33
-              lat_mid2 = lat_b + d_lat * 0.66
-              lon_mid2 = lon_b + d_lon * 0.66
+              # Prevent accidentally geocoding an ambiguous non-Turkey result.
+              if not _tr_norm(loc_b.address).endswith("turkiye") and "turkiye" not in _tr_norm(loc_b.address):
+                st.warning("Başlangıç konumunun Türkiye'de olduğu doğrulanamadı.")
+              if "turkiye" not in _tr_norm(loc_v.address) and "turkey" not in _tr_norm(loc_v.address):
+                st.warning("Varış konumunun Türkiye'de olduğu doğrulanamadı.")
 
-              route_current_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,cape"
+              lat_b, lon_b = float(loc_b.latitude), float(loc_b.longitude)
+              lat_v, lon_v = float(loc_v.latitude), float(loc_v.longitude)
+              straight_km = geodesic((lat_b, lon_b), (lat_v, lon_v)).km
+              mode_ok, mode_reason = _tr_mode_availability(ulasim_turu, loc_b, loc_v, straight_km)
 
-              def get_point_weather_safe(lat, lon):
-                try:
-                  params = {
-                      "latitude": lat, "longitude": lon,
-                      "current": route_current_vars, "timezone": "auto",
-                      "wind_speed_unit": "kmh", "precipitation_unit": "mm",
-                  }
-                  res = _open_meteo_get(OPEN_METEO_FORECAST_URL, params, timeout=6).get("current", {})
-                  return {k: _safe_number(res.get(k)) for k in route_current_vars.split(",")}
-                except Exception:
-                  return {k: 0.0 for k in route_current_vars.split(",")}
+              if mode_ok is False:
+                alternatives=[]
+                for candidate in ["Özel araç", "Otobüs", "Uçak", "Deniz yolu", "Tren"]:
+                  if candidate == ulasim_turu: continue
+                  candidate_ok, _ = _tr_mode_availability(candidate, loc_b, loc_v, straight_km)
+                  if candidate_ok is True: alternatives.append(candidate)
+                if alternatives:
+                  st.error(f"Seçilen seyahat türü doğrulanamadı. {mode_reason}\n\n**Bu iki konum için uygun görünen seçenekler:** " + " ve ".join(alternatives) + ".")
+                else:
+                  st.error(f"Seçilen seyahat türü doğrulanamadı. {mode_reason}\n\n**Uygun ulaşım türü bu veriyle doğrulanamadı.**")
+                st.session_state.route_map_data = None
+              elif mode_ok is None:
+                st.warning(mode_reason)
+                st.session_state.route_map_data = None
+              else:
+                route_geometry=[]; route_distance_m=None; route_duration_s=None; route_source=""
+                if ulasim_turu in ("Özel araç", "Otobüs"):
+                  try:
+                    osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
+                      f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
+                    osrm_resp = requests.get(osrm_url, params={"overview":"full", "geometries":"geojson", "steps":"false"}, timeout=15)
+                    osrm_resp.raise_for_status(); osrm_json=osrm_resp.json()
+                    if osrm_json.get("code") == "Ok" and osrm_json.get("routes"):
+                      rr=osrm_json["routes"][0]
+                      route_geometry=[(float(pt[1]), float(pt[0])) for pt in rr["geometry"]["coordinates"]]
+                      route_distance_m=float(rr.get("distance", 0)); route_duration_s=float(rr.get("duration", 0))
+                      route_source="OSRM / OpenStreetMap yol ağı"
+                    else:
+                      raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
+                  except Exception as route_err:
+                    st.error(f"Gerçek karayolu rotası alınamadı: {route_err}. Düz çizgiyle rota varmış gibi gösterilmeyecek.")
+                    st.session_state.route_map_data=None
+                else:
+                  # Non-road modes: show only a clearly labelled schematic connection.
+                  route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
+                  route_source="Şematik bağlantı (gerçek sefer/hat geometrisi değildir)"
+                  if ulasim_turu == "Tren":
+                    a_tokens, b_tokens = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
+                    rail_path = _tr_rail_path(a_tokens[0], b_tokens[0]) if a_tokens and b_tokens else None
+                    if rail_path:
+                      route_source += " · demiryolu şehir koridoru: " + " → ".join(rail_path)
 
-              with ThreadPoolExecutor(max_workers=4) as executor:
-                future_b = executor.submit(get_point_weather_safe, lat_b, lon_b)
-                future_m1 = executor.submit(get_point_weather_safe, lat_mid1, lon_mid1)
-                future_m2 = executor.submit(get_point_weather_safe, lat_mid2, lon_mid2)
-                future_v = executor.submit(get_point_weather_safe, lat_v, lon_v)
+                if route_geometry:
+                  # Select 5 representative points along actual road geometry, or endpoints for schematic routes.
+                  if len(route_geometry)>2:
+                    indices=sorted(set([0, len(route_geometry)//4, len(route_geometry)//2, (3*len(route_geometry))//4, len(route_geometry)-1]))
+                    sample_pts=[route_geometry[i] for i in indices]
+                  else:
+                    sample_pts=route_geometry
+                  route_weather=[]
+                  weather_vars="temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
+                  def get_date_weather(lat,lon):
+                    try:
+                      params={"latitude":lat,"longitude":lon,"hourly":weather_vars,
+                        "start_date":planlanan_tarih.isoformat(),"end_date":planlanan_tarih.isoformat(),
+                        "timezone":"auto","wind_speed_unit":"kmh","precipitation_unit":"mm"}
+                      data=requests.get("https://api.open-meteo.com/v1/forecast",params=params,timeout=12).json()
+                      hourly=data.get("hourly",{}); times=hourly.get("time",[])
+                      if not times: return None
+                      # Pick midday sample (12:00), fallback to first available hour.
+                      idx=next((i for i,t in enumerate(times) if str(t).endswith("T12:00")),0)
+                      return {k:(hourly.get(k,[None]*len(times))[idx] if idx<len(hourly.get(k,[])) else None) for k in weather_vars.split(",")}
+                    except Exception: return None
+                  with ThreadPoolExecutor(max_workers=min(5,len(sample_pts))) as ex:
+                    route_weather=list(ex.map(lambda xy:get_date_weather(xy[0],xy[1]), sample_pts))
 
-                res_b = future_b.result()
-                res_m1 = future_m1.result()
-                res_m2 = future_m2.result()
-                res_v = future_v.result()
+                  risk_markers=[]; report_rows=[]; route_status="green"
+                  for i,(xy,wx) in enumerate(zip(sample_pts,route_weather)):
+                    if not wx:
+                      report_rows.append({"Rota noktası":f"Nokta {i+1}","Hava durumu":"Seçilen tarih için veri alınamadı","Risk":"Bilinmiyor"})
+                      continue
+                    temp=wx.get("temperature_2m"); snow=wx.get("snowfall") or 0; precip=wx.get("precipitation") or 0
+                    wind=wx.get("wind_speed_10m") or 0; gust=wx.get("wind_gusts_10m") or 0
+                    code=wx.get("weather_code")
+                    risks=[]; severity="green"
+                    if temp is not None and temp<=0 and (snow>0 or precip>0): risks.append("Don/buzlanma ihtimali"); severity="red"
+                    if snow>0: risks.append("Kar yağışı"); severity="red"
+                    if precip>=10: risks.append("Kuvvetli yağış"); severity="orange" if severity!="red" else severity
+                    if gust>=60: risks.append("Kuvvetli rüzgâr hamlesi"); severity="red"
+                    elif gust>=40: risks.append("Rüzgâr hamlesi yüksek"); severity="orange" if severity!="red" else severity
+                    if risks:
+                      route_status="red" if severity=="red" else ("orange" if route_status=="green" else route_status)
+                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Riskli rota noktası {i+1}","risk":True,"severity":severity,"desc":"; ".join(risks)})
+                    report_rows.append({"Rota noktası":f"Nokta {i+1}","Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
+                      "Sıcaklık":f"{temp} °C" if temp is not None else "N/A","Yağış":f"{precip} mm",
+                      "Kar":f"{snow} cm","Rüzgâr hamlesi":f"{gust} km/sa","Risk":"; ".join(risks) if risks else "Belirgin risk eşiği aşılmadı"})
 
-              markers_for_route_map = []
-              detailed_written_report = []
-              durum_kodu = "yesil"
-
-              point_records = [
-                  {"name": f"Kalkış: {loc_b.address}", "lat": lat_b, "lon": lon_b, "data": res_b},
-                  {"name": f"Yol Üstü Ara Geçiş 1", "lat": lat_mid1, "lon": lon_mid1, "data": res_m1},
-                  {"name": f"Yol Üstü Ara Geçiş 2", "lat": lat_mid2, "lon": lon_mid2, "data": res_m2},
-                  {"name": f"Varış: {loc_v.address}", "lat": lat_v, "lon": lon_v, "data": res_v}
-              ]
-
-              for p in point_records:
-                p_data = p["data"]
-                p_temp = p_data.get('temperature_2m', 15)
-                p_snow = p_data.get('snowfall', 0)
-                p_gust = p_data.get('wind_gusts_10m', 0)
-                p_wind = p_data.get('wind_speed_10m', 0)
-                p_cape = p_data.get('cape', 0)
-                p_precip = p_data.get('precipitation', 0)
-
-                is_risky = False
-                risk_title = "Stabil / Güvenli Koşullar"
-                risk_desc = f"Sıcaklık: {p_temp:.1f}°C | Rüzgar: {p_wind:.1f} km/s (Hamle: {p_gust:.1f}) | Yağış: {p_precip:.1f} mm"
-
-                if ulasim_turu.startswith("Özel Araç"):
-                  if p_temp <= 0:
-                    durum_kodu = "kirmizi"
-                    is_risky = True
-                    risk_title = "❄️ Don / Gizli Buzlanma Tehlikesi"
-                    risk_desc = f"Sıcaklık 0°C altında ({p_temp:.1f}°C). Don riski var!"
-                  elif p_snow > 0:
-                    durum_kodu = "kirmizi"
-                    is_risky = True
-                    risk_title = "🌨️ Aktif Kar Yağışı"
-                    risk_desc = f"Kar geçişi ({p_snow:.1f} cm) var."
-                  elif p_gust > 40 or p_cape > 250:
-                    if durum_kodu != "kirmizi": durum_kodu = "sari"
-                    is_risky = True
-                    risk_title = "⚡ Fırtına / Kararsızlık Riski"
-                    risk_desc = f"Rüzgar hamlesi {p_gust:.1f} km/s (CAPE: {p_cape:.0f})."
-
-                markers_for_route_map.append({
-                    "lat": p["lat"], "lon": p["lon"], "name": p["name"], "desc": risk_desc, "risk": is_risky
-                })
-                detailed_written_report.append({
-                    "Nokta": p["name"], "Koordinat": f"({p['lat']:.4f}, {p['lon']:.4f})",
-                    "Sıcaklık": f"{p_temp:.1f} °C", "Rüzgar / Hamle": f"{p_wind:.1f} / {p_gust:.1f} km/s",
-                    "Yağış": f"{p_precip:.1f} mm", "Durum / Risk": risk_title, "Açıklama": risk_desc
-                })
-
-              st.session_state.route_map_data = {
-                  "bas_ad": loc_b.address, "bit_ad": loc_v.address,
-                  "lat_b": lat_b, "lon_b": lon_b, "lat_v": lat_v, "lon_v": lon_v,
-                  "markers": markers_for_route_map, "report_table": detailed_written_report,
-                  "durum": durum_kodu, "tarih": planlanan_tarih.strftime('%d.%m.%Y')
-              }
-          else:
-            st.error("Girilen başlangıç veya varış konumu küresel haritada bulunamadı.")
-        except Exception as e:
-          st.error(f"Global güzergah analiz hatası: {e}")
+                  markers=[{"lat":lat_b,"lon":lon_b,"name":"Başlangıç: "+loc_b.address,"risk":False,"desc":"Başlangıç konumu"},
+                           {"lat":lat_v,"lon":lon_v,"name":"Varış: "+loc_v.address,"risk":False,"desc":"Varış konumu"}] + risk_markers
+                  st.session_state.route_map_data={"bas_ad":loc_b.address,"bit_ad":loc_v.address,
+                    "lat_b":lat_b,"lon_b":lon_b,"lat_v":lat_v,"lon_v":lon_v,"markers":markers,
+                    "route_geometry":route_geometry,"route_source":route_source,"report_table":report_rows,
+                    "status":route_status,"date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
+                    "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
+                  st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
+          except Exception as e:
+            st.error(f"Türkiye içi güzergâh analiz hatası: {e}")
 
     if st.session_state.get("route_map_data"):
-      r_info = st.session_state.route_map_data
-      st.markdown(f"### 📋 Rota Detaylı Yazılı Risk Raporu")
-      report_df = pd.DataFrame(r_info["report_table"])
-      st.dataframe(report_df, use_container_width=True, hide_index=True)
+      r_info=st.session_state.route_map_data
+      st.markdown("### 📋 Seyahat uygunluğu ve yol üstü risk raporu")
+      st.write(f"**Tarih:** {r_info['date']} · **Tür:** {r_info['mode']} · **Kaynak:** {r_info['route_source']}")
+      if r_info.get("distance_m"):
+        st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
+        if r_info.get("duration_s"):
+          st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
+      st.caption("Hava riskleri seçilen tarihin tahmin verilerinden, örnekleme amacıyla saat 12:00 civarında alınır. Uzak tarih veya eksik tahmin varsa raporda veri eksikliği belirtilir; bu bir resmi yol/AFAD/KGM uyarısı değildir.")
+      st.dataframe(pd.DataFrame(r_info["report_table"]), use_container_width=True, hide_index=True)
 
-      st.markdown(f"### 🗺️ Global Güzergah Haritası")
-      mid_lat = (r_info["lat_b"] + r_info["lat_v"]) / 2
-      mid_lon = (r_info["lon_b"] + r_info["lon_v"]) / 2
-      
-      route_m = folium.Map(location=[mid_lat, mid_lon], zoom_start=5, tiles="OpenStreetMap")
-      Fullscreen().add_to(route_m)
-      LocateControl().add_to(route_m)
-
-      poly_pts = [(m["lat"], m["lon"]) for m in r_info["markers"]]
-      folium.PolyLine(poly_pts, color="#ff4b4b", weight=5, opacity=0.85, tooltip="Güzergah Koridoru").add_to(route_m)
-
-      for m_item in r_info["markers"]:
-        c_color = "red" if m_item["risk"] else "green"
-        c_icon = "warning-sign" if m_item["risk"] else "ok-sign"
-        popup_html = f"<b>{m_item['name']}</b><br>{m_item['desc']}"
-        folium.Marker(
-            [m_item["lat"], m_item["lon"]],
-            popup=folium.Popup(popup_html, max_width=320),
-            tooltip=m_item["name"],
-            icon=folium.Icon(color=c_color, icon=c_icon, prefix="glyphicon"),
-        ).add_to(route_m)
-
-      route_map_data = st_folium(
-          route_m, width="100%", height=450, key="global_route_map_view_v6_sync",
-          returned_objects=["last_clicked", "zoom"]
-      )
-
-      # Rota haritasina tiklandiginda secilen baslangic/varis kutusunu doldur.
-      route_clicked = route_map_data.get("last_clicked") if route_map_data else None
+      st.markdown("### 🗺️ Güzergâh haritası")
+      all_pts=r_info.get("route_geometry") or [(r_info["lat_b"],r_info["lon_b"]),(r_info["lat_v"],r_info["lon_v"])]
+      center_lat=sum(p[0] for p in all_pts)/len(all_pts); center_lon=sum(p[1] for p in all_pts)/len(all_pts)
+      route_m=folium.Map(location=[center_lat,center_lon],zoom_start=6,tiles="OpenStreetMap")
+      Fullscreen().add_to(route_m); LocateControl().add_to(route_m)
+      if r_info.get("mode") in ("Özel araç","Otobüs") and len(all_pts)>2:
+        folium.PolyLine(all_pts,color="#2b7bff",weight=5,opacity=0.85,tooltip="OSRM gerçek yol ağı rotası").add_to(route_m)
+      else:
+        folium.PolyLine(all_pts,color="#888888",weight=3,opacity=0.8,dash_array="8,8",tooltip="Şematik bağlantı; gerçek hat değildir").add_to(route_m)
+      for item in r_info["markers"]:
+        color="red" if item.get("risk") else ("blue" if "Başlangıç" in item.get("name","") else "green")
+        popup=f"<b>{item['name']}</b><br>{item.get('desc','')}"
+        folium.Marker([item["lat"],item["lon"]],popup=folium.Popup(popup,max_width=350),tooltip=item["name"],
+          icon=folium.Icon(color=color,icon="warning-sign" if item.get("risk") else "info-sign",prefix="glyphicon")).add_to(route_m)
+      route_map_data=st_folium(route_m,width="100%",height=460,key="route_map_turkey_smart_v1",returned_objects=["last_clicked","zoom"])
+      route_clicked=route_map_data.get("last_clicked") if route_map_data else None
       if route_clicked:
-        rlat = round(float(route_clicked.get("lat")), 6)
-        rlon = round(float(route_clicked.get("lng")), 6)
-        route_click_fingerprint = (rlat, rlon)
-        if route_click_fingerprint != st.session_state.get("_route_map_last_click"):
-          st.session_state["_route_map_last_click"] = route_click_fingerprint
+        rlat=round(float(route_clicked.get("lat")),6); rlon=round(float(route_clicked.get("lng")),6)
+        fingerprint=(rlat,rlon)
+        if fingerprint!=st.session_state.get("_route_map_last_click"):
+          st.session_state["_route_map_last_click"]=fingerprint
           try:
-            route_reverse = geolocator.reverse((rlat, rlon), timeout=2)
-            route_place = route_reverse.address if route_reverse and route_reverse.address else f"{rlat:.5f}, {rlon:.5f}"
-          except Exception:
-            route_place = f"{rlat:.5f}, {rlon:.5f}"
-
-          if route_map_target == "Başlangıç":
-            st.session_state["_pending_route_start_value"] = route_place
-            st.session_state["_pending_route_start"] = True
+            reverse=geolocator.reverse((rlat,rlon),timeout=3)
+            place=reverse.address if reverse and reverse.address else f"{rlat:.5f}, {rlon:.5f}"
+          except Exception: place=f"{rlat:.5f}, {rlon:.5f}"
+          if route_map_target=="Başlangıç":
+            st.session_state["_pending_route_start_value"]=place; st.session_state["_pending_route_start"]=True
           else:
-            st.session_state["_pending_route_end_value"] = route_place
-            st.session_state["_pending_route_end"] = True
-          st.session_state["route_map_selection_notice"] = route_place
+            st.session_state["_pending_route_end_value"]=place; st.session_state["_pending_route_end"]=True
           st.rerun()
 
 
