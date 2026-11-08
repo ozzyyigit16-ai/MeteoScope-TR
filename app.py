@@ -12,6 +12,8 @@ import time
 import os
 import sqlite3
 import json
+import re
+import html as html_lib
 from io import StringIO
 import tempfile
 import streamlit.components.v1 as components
@@ -170,23 +172,88 @@ def render_live_admin_metrics():
     st.caption("Bu veriler sadece şifre bilen yöneticiler tarafından görülebilir.")
 
 
-# --- AKILLI GİYİM ÖNERİSİ MOTORU ---
-def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, max_ruzgar):
-  if max_ruzgar is not None and max_ruzgar > 45:
-    return "🌪️ **Giyim Önerisi:** Kuvvetli rüzgâr hamlesi bekleniyor; rüzgârı kesen dış katman tercih edin."
-  if toplam_kar is not None and toplam_kar > 0.5:
-    return "❄️ **Giyim Önerisi:** Kar beklentisi var; sıcak tutan mont ve su geçirmez ayakkabı tercih edin."
-  if ortalama_sicaklik is None:
-    return "ℹ️ **Giyim Önerisi:** Sıcaklık verisi eksik olduğu için güvenilir kıyafet önerisi üretilemedi."
-  if ortalama_sicaklik <= 0:
-    return "❄️ **Giyim Önerisi:** Sıcaklık sıfırın altında; kalın kışlık mont ve bot tercih edin."
-  if toplam_yagis is not None and toplam_yagis > 1.0:
-    return "🌧️ **Giyim Önerisi:** Yağış bekleniyor; su geçirmez dış katman veya şemsiye alın."
-  if ortalama_sicaklik < 12:
-    return "🧥 **Giyim Önerisi:** Hava serin/soğuk; kat kat giyinin."
-  if ortalama_sicaklik > 25:
-    return "👕 **Giyim Önerisi:** Hava sıcak; hafif kıyafetler tercih edin."
-  return "👔 **Giyim Önerisi:** Sıcaklık ılıman aralıkta; mevsime uygun hafif katmanlar tercih edin."
+# --- GELİŞMİŞ GİYİM VE SAHA ÖNERİSİ MOTORU ---
+def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, max_ruzgar,
+                          hissedilen_sicaklik=None, min_sicaklik=None,
+                          max_sicaklik=None, yagis_olasiligi=None):
+  """Tahmin verilerine göre uygulanabilir giyim/ hazırlık önerileri üretir."""
+  if ortalama_sicaklik is None and hissedilen_sicaklik is None and min_sicaklik is None and max_sicaklik is None:
+    return ("### 👕 Giyim ve Hazırlık Önerisi\n"
+            "Sıcaklık tahmini eksik olduğu için güvenilir bir kıyafet önerisi oluşturulamıyor. "
+            "Yağış ve rüzgâr verileri mevcutsa bu koşullara yönelik tedbirleri ayrıca dikkate alın.")
+
+  referans_sicaklik = hissedilen_sicaklik if hissedilen_sicaklik is not None else ortalama_sicaklik
+  oneriler = []
+  if referans_sicaklik is not None:
+    if referans_sicaklik <= 0:
+      oneriler.append("**Soğuk:** Isı yalıtımlı kalın mont, bere, eldiven ve atkı kullanın; uzun süre dışarıda kalacaksanız katmanlı giyinin.")
+    elif referans_sicaklik < 8:
+      oneriler.append("**Serin/soğuk:** Kalın mont veya sıcak tutan kaban tercih edin; sabah ve akşam için ek bir katman bulundurun.")
+    elif referans_sicaklik < 15:
+      oneriler.append("**Ilık-serin:** İnce/orta kalınlıkta ceket ve çıkarılabilir ara katman tercih edin.")
+    elif referans_sicaklik < 24:
+      oneriler.append("**Ilıman:** Uzun kollu hafif üst veya ince ceket yeterli olabilir; gün içindeki sıcaklık değişimine göre katman kullanın.")
+    elif referans_sicaklik < 30:
+      oneriler.append("**Sıcak:** Nefes alabilen, açık renkli ve hafif kıyafetler tercih edin.")
+    else:
+      oneriler.append("**Çok sıcak:** Bol, açık renkli ve nefes alabilen kıyafetler giyin; şapka kullanın ve gölgede kalmaya özen gösterin.")
+
+  if min_sicaklik is not None and max_sicaklik is not None and max_sicaklik - min_sicaklik >= 8:
+    oneriler.append(f"**Gün içi sıcaklık farkı:** Tahmin edilen aralık {min_sicaklik:.1f}–{max_sicaklik:.1f} °C. Sabah/akşam için fazladan bir katman alın.")
+
+  if toplam_yagis is not None and toplam_yagis >= 1.0:
+    probability_text = f" Yağış olasılığı en yüksek saatlerde %{yagis_olasiligi:.0f} seviyesine çıkıyor." if yagis_olasiligi is not None else ""
+    oneriler.append(f"**Yağış:** Üç günlük toplam yağış tahmini {toplam_yagis:.1f} mm.{probability_text} Suya dayanıklı ayakkabı/dış katman ve şemsiye bulundurun.")
+  elif yagis_olasiligi is not None and yagis_olasiligi >= 40:
+    oneriler.append(f"**Yağış ihtimali:** Saatlik olasılık en fazla %{yagis_olasiligi:.0f}. Dışarıda uzun süre kalacaksanız hafif yağmurluk bulundurun.")
+
+  if toplam_kar is not None and toplam_kar > 0:
+    oneriler.append("**Kar/buzlanma:** Su geçirmez, tabanı tutuşu iyi bot tercih edin; kaygan zeminlerde dikkatli yürüyün.")
+
+  if max_ruzgar is not None and max_ruzgar >= 30:
+    if max_ruzgar >= 60:
+      oneriler.append(f"**Rüzgâr:** Hamlelerin {max_ruzgar:.0f} km/sa seviyesine ulaşması bekleniyor. Rüzgârı kesen, kapüşonlu bir dış katman giyin; şemsiye yerine yağmurluk tercih edin.")
+    else:
+      oneriler.append(f"**Rüzgâr:** Hamleler {max_ruzgar:.0f} km/sa seviyesine çıkabilir. Rüzgâr geçirmeyen ince bir ceket faydalı olur.")
+
+  if not oneriler:
+    oneriler.append("Belirgin bir giyim riski öne çıkmıyor. Mevsime uygun, rahat ve gerektiğinde çıkarılabilir bir katman tercih edin.")
+
+  return "### 👕 Giyim ve Hazırlık Önerisi\n" + "\n".join(f"- {item}" for item in oneriler)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_mgm_official_warnings():
+  """MGM'nin resmî günlük tahmin sayfasındaki UYARILAR bölümünü alır."""
+  urls = [
+      "https://www.mgm.gov.tr/tahmin/gunluk-tahmin.aspx",
+      "https://www.mgm.gov.tr/pda/gunluk-tahmin-PDA.aspx",
+  ]
+  last_error = None
+  for url in urls:
+    try:
+      response = requests.get(url, timeout=12, headers={"User-Agent": "MeteoScope-TR/1.0"})
+      response.raise_for_status()
+      raw = response.text
+      # Navigasyon/biçimlendirme etiketlerini kaldırıp uyarı bölümünü ayıkla.
+      raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.I | re.S)
+      plain = re.sub(r"<[^>]+>", " ", raw)
+      plain = html_lib.unescape(plain)
+      plain = re.sub(r"\s+", " ", plain)
+      match = re.search(r"\bUYARILAR\b(.*?)(?:\bBÖLGELERİMİZDE HAVA\b|\bMARMARA\b)", plain, flags=re.I | re.S)
+      if match:
+        warning_text = re.sub(r"\s+", " ", match.group(1)).strip(" :-–—|")
+        warning_text = re.sub(r"^(?:UYARILAR?\s*)+", "", warning_text, flags=re.I).strip()
+        if warning_text and not re.fullmatch(r"[-–—| ]*", warning_text):
+          if "herhangi bir meteorolojik uyarı bulunmamaktadır" in warning_text.casefold():
+            return {"status": "none", "text": "MGM günlük tahmin sayfasında herhangi bir meteorolojik uyarı bulunmadığı belirtiliyor.", "url": url}
+          return {"status": "active", "text": warning_text[:5000], "url": url}
+      if "herhangi bir meteorolojik uyarı bulunmamaktadır" in plain.casefold():
+        return {"status": "none", "text": "MGM günlük tahmin sayfasında herhangi bir meteorolojik uyarı bulunmadığı belirtiliyor.", "url": url}
+      last_error = "MGM sayfası yanıt verdi ancak uyarı bölümü okunamadı."
+    except Exception as exc:
+      last_error = f"MGM uyarı servisine ulaşılamadı: {type(exc).__name__}"
+  return {"status": "unavailable", "text": last_error or "Resmî uyarı bilgisi şu anda alınamadı.", "url": "https://www.mgm.gov.tr/meteouyari/turkiye.aspx"}
 
 
 # --- SAAT BAZLI KONUM TEHLİKE TARAMA MOTORU ---
@@ -1184,13 +1251,13 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         if max_hourly_p is None:
           yagis_durum_str = "Veri yok"
         elif max_hourly_p >= 7.0:
-          yagis_durum_str = f"🔴 Şiddetli saatlik yağış eşiği (Toplam: {d_precip:.1f} mm | Maksimum: {max_hourly_p:.1f} mm/saat)"
+          yagis_durum_str = f"🔴 Şiddetli saatlik yağış sinyali (en yüksek saat: {max_hourly_p:.1f} mm/saat)"
         elif max_hourly_p >= 5.0:
-          yagis_durum_str = f"🟠 Kuvvetli yağış (Toplam: {d_precip:.1f} mm)"
+          yagis_durum_str = "🟠 Kuvvetli saatlik yağış sinyali"
         elif d_precip is not None and d_precip > 1.0:
-          yagis_durum_str = f"🟡 Hafif/normal yağış (Toplam: {d_precip:.1f} mm)"
+          yagis_durum_str = "🟡 Hafif/normal yağış"
         else:
-          yagis_durum_str = f"🟢 Düşük yağış (Toplam: {d_precip:.1f} mm)" if d_precip is not None else "Veri yok"
+          yagis_durum_str = "🟢 Düşük yağış" if d_precip is not None else "Veri yok"
 
         gun_ismi = pd.to_datetime(d).strftime('%A')
         gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
@@ -1199,7 +1266,8 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
           with st.container(border=True):
             st.markdown(f"**📌 {d} ({gun_tr})**")
             st.metric(label="Min / Max Sıcaklık (Best Match)", value=(f"{d_min_t:.1f}°C / {d_max_t:.1f}°C" if d_min_t is not None and d_max_t is not None else "Veri yok"))
-            st.metric(label="Şiddet & mm Yağış Beklentisi", value=yagis_durum_str)
+            st.metric(label="Yağış Durumu", value=yagis_durum_str)
+            st.metric(label="Beklenen Toplam Yağış", value=(f"{d_precip:.1f} mm" if d_precip is not None else "Veri yok"))
             st.metric(label="Maksimum Rüzgâr Hamlesi", value=(f"{d_wind:.1f} km/sa" if d_wind is not None and pd.notna(d_wind) else "Veri yok"))
 
     if current_data:
@@ -1266,43 +1334,73 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.info("Arşiv verisi bulunamadı. " + (archive_error or "API bu tarih aralığı için boş yanıt verdi."))
 
     with tab3:
-      st.subheader("📄 Otomatik Meteorolojik Bülten")
+      st.subheader("📄 Meteorolojik Bülten ve Uzman Yaklaşımıyla Öneriler")
       rep_temp = pd.to_numeric(df_3days["temperature_2m"], errors="coerce").dropna() if "temperature_2m" in df_3days.columns else pd.Series(dtype=float)
-      rep_min = rep_temp.min() if not rep_temp.empty else None
-      rep_max = rep_temp.max() if not rep_temp.empty else None
+      rep_min = float(rep_temp.min()) if not rep_temp.empty else None
+      rep_max = float(rep_temp.max()) if not rep_temp.empty else None
       rep_precip_series = pd.to_numeric(df_3days["precipitation"], errors="coerce").dropna() if "precipitation" in df_3days.columns else pd.Series(dtype=float)
       rep_snow_series = pd.to_numeric(df_3days["snowfall"], errors="coerce").dropna() if "snowfall" in df_3days.columns else pd.Series(dtype=float)
+      rep_prob_series = pd.to_numeric(df_3days["precipitation_probability"], errors="coerce").dropna() if "precipitation_probability" in df_3days.columns else pd.Series(dtype=float)
       rep_precip = float(rep_precip_series.sum()) if not rep_precip_series.empty else None
       rep_snow = float(rep_snow_series.sum()) if not rep_snow_series.empty else None
-      rep_wind = df_3days["wind_gusts_10m"].max() if "wind_gusts_10m" in df_3days.columns else (df_3days["wind_speed_10m"].max() if "wind_speed_10m" in df_3days.columns else None)
-      
+      rep_wind_series = pd.to_numeric(df_3days["wind_gusts_10m"], errors="coerce").dropna() if "wind_gusts_10m" in df_3days.columns else pd.Series(dtype=float)
+      if rep_wind_series.empty and "wind_speed_10m" in df_3days.columns:
+        rep_wind_series = pd.to_numeric(df_3days["wind_speed_10m"], errors="coerce").dropna()
+      rep_wind = float(rep_wind_series.max()) if not rep_wind_series.empty else None
+      rep_prob = float(rep_prob_series.max()) if not rep_prob_series.empty else None
       giyim_tavsiyesi = giyim_onerisi_olustur(
-          current_data.get('temperature_2m') if current_data.get('temperature_2m') is not None else 15,
-          rep_precip,
-          rep_snow,
-          rep_wind if rep_wind is not None and pd.notna(rep_wind) else None
+          current_data.get("temperature_2m"), rep_precip, rep_snow, rep_wind,
+          hissedilen_sicaklik=current_data.get("apparent_temperature"),
+          min_sicaklik=rep_min, max_sicaklik=rep_max,
+          yagis_olasiligi=rep_prob,
       )
-      
+      official_warning = fetch_mgm_official_warnings()
+      selected_location = st.session_state.get("location_label", "Seçilen konum")
+      active_models = [name for name in ("ECMWF IFS", "GFS", "ICON") if name in model_status]
+
       with st.container(border=True):
-        st.markdown(f"**Konum Koordinatları:** Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}")
-        st.markdown(f"**Anlık Sıcaklık:** {current_data['temperature_2m']:.1f} °C" if current_data.get('temperature_2m') is not None else "**Anlık Sıcaklık:** Veri yok")
-        st.markdown(f"**Önümüzdeki 3 Gün Toplam Yağış Beklentisi:** {rep_precip:.1f} mm" if rep_precip is not None else "**Önümüzdeki 3 Gün Toplam Yağış Beklentisi:** Veri yok")
-        st.markdown(f"**Maksimum Rüzgâr Hamlesi:** {rep_wind:.1f} km/sa" if rep_wind is not None and pd.notna(rep_wind) else "**Maksimum Rüzgâr Hamlesi:** Veri yok")
-        st.markdown("---")
-        st.markdown(giyim_tavsiyesi)
-        st.markdown("---")
-        active_models = [name for name in ("ECMWF IFS", "GFS", "ICON") if name in model_status]
-        st.info("💡 **Otomatik model özeti:** " + ("Karşılaştırma için kullanılabilen modeller: " + ", ".join(active_models) + "." if active_models else "Yalnızca Best Match verisi kullanılabiliyor; çoklu model konsensüsü oluşturulamadı.") + " Bu çıktı resmî meteorolojik uyarı değildir.")
-      
+        st.markdown(f"**Analiz Konumu:** {selected_location}")
+        st.markdown(f"**Koordinatlar:** {st.session_state.lat:.4f}, {st.session_state.lon:.4f}")
+        st.markdown(f"**Tahmin zamanı:** {local_time_text}")
+        st.markdown(f"**Anlık sıcaklık / hissedilen:** {current_data.get('temperature_2m'):.1f} °C / {current_data.get('apparent_temperature'):.1f} °C" if current_data.get("temperature_2m") is not None and current_data.get("apparent_temperature") is not None else "**Anlık sıcaklık / hissedilen:** Eksik veri")
+        st.markdown(f"**Önümüzdeki 3 gün toplam yağış:** {rep_precip:.1f} mm" if rep_precip is not None else "**Önümüzdeki 3 gün toplam yağış:** Veri yok")
+        st.markdown(f"**Önümüzdeki 3 gün sıcaklık aralığı:** {rep_min:.1f}–{rep_max:.1f} °C" if rep_min is not None and rep_max is not None else "**Önümüzdeki 3 gün sıcaklık aralığı:** Veri yok")
+        st.markdown(f"**Maksimum rüzgâr hamlesi:** {rep_wind:.1f} km/sa" if rep_wind is not None else "**Maksimum rüzgâr hamlesi:** Veri yok")
+        st.caption("Tahmin kaynağı: Open-Meteo Best Match. Çoklu model durumu: " + (", ".join(active_models) if active_models else "bağımsız model verisi bulunamadı; Best Match kullanılıyor."))
+
+      st.markdown("### 🏛️ MGM Resmî Meteorolojik Uyarısı")
+      if official_warning["status"] == "active":
+        st.warning(official_warning["text"])
+        st.caption("Kaynak: Meteoroloji Genel Müdürlüğü günlük tahmin raporu. Bu bölüm ülke geneli resmî uyarı metnini gösterir; seçilen nokta için il/ilçe kapsamını resmî MeteoUYARI haritasından ayrıca kontrol edebilirsiniz.")
+      elif official_warning["status"] == "none":
+        st.success(official_warning["text"])
+      else:
+        st.info("MGM'nin resmî uyarı metni şu anda uygulamaya alınamadı. Uyarı var/yok şeklinde tahmin yürütülmedi; güncel durumu resmî sayfadan kontrol edin. " + official_warning["text"])
+      st.markdown("[MGM Resmî MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx) · [MGM günlük tahmin ve uyarı raporunu aç](https://www.mgm.gov.tr/tahmin/gunluk-tahmin.aspx)")
+
+      st.markdown("---")
+      st.markdown(giyim_tavsiyesi)
+      st.caption("Öneriler, seçili konumun üç günlük tahminindeki sıcaklık, hissedilen sıcaklık, yağış, yağış olasılığı, kar ve rüzgâr verileri kullanılarak hazırlanır. Tedbir yaklaşımı için MGM'nin resmî meteorolojik uyarı ve sınıflandırmaları esas alınır.")
+      st.markdown("[MGM meteorolojik hadiseler ve MeteoUYARI açıklamaları](https://www.mgm.gov.tr/Meteouyari/meteouyari-nedir.aspx) · [MGM meteorolojik şiddet sınıflandırması](https://www.mgm.gov.tr/site/yardim1.aspx?=HadSid)")
+
       current_temp_text = f"{current_data['temperature_2m']:.1f} °C" if current_data.get("temperature_2m") is not None else "Veri yok"
-      rep_wind_text = f"{rep_wind:.1f} km/sa" if rep_wind is not None and pd.notna(rep_wind) else "Veri yok"
-      report_text = (f"METEOROLOJİK OTOMATİK ÖZET\nKonum: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}\n"
-                     f"Tahmin zamanı: {local_time_text}\nAnlık sıcaklık: {current_temp_text}\n"
-                     f"Best Match 3 günlük sıcaklık aralığı: {rep_min:.1f}–{rep_max:.1f} °C\n" if rep_min is not None and rep_max is not None else
-                     f"METEOROLOJİK OTOMATİK ÖZET\nKonum: Enlem {st.session_state.lat:.4f}, Boylam {st.session_state.lon:.4f}\nTahmin zamanı: {local_time_text}\nAnlık sıcaklık: {current_temp_text}\n")
+      rep_wind_text = f"{rep_wind:.1f} km/sa" if rep_wind is not None else "Veri yok"
+      rep_temp_text = f"{rep_min:.1f}–{rep_max:.1f} °C" if rep_min is not None and rep_max is not None else "Veri yok"
       rep_precip_text = f"{rep_precip:.1f} mm" if rep_precip is not None else "Veri yok"
-      report_text += f"Toplam yağış (3 gün): {rep_precip_text}\nMaksimum rüzgâr hamlesi: {rep_wind_text}\nKullanılabilen modeller: {', '.join(active_models) if active_models else 'Yalnızca Best Match'}\n\n{giyim_tavsiyesi}\n\nNot: Otomatik model özeti; resmî meteorolojik uyarı değildir."
-      st.download_button("📥 Uzman Bültenini İndir", report_text.encode("utf-8"), file_name="meteo_expert_report.txt", mime="text/plain")
+      official_text = official_warning.get("text", "Resmî uyarı alınamadı.")
+      report_text = (
+          "METEOROLOJİK BÜLTEN VE HAZIRLIK ÖNERİLERİ\n"
+          f"Konum: {selected_location}\nKoordinatlar: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}\n"
+          f"Tahmin zamanı: {local_time_text}\nAnlık sıcaklık: {current_temp_text}\n"
+          f"Best Match 3 günlük sıcaklık aralığı: {rep_temp_text}\n"
+          f"Toplam yağış (3 gün): {rep_precip_text}\nMaksimum rüzgâr hamlesi: {rep_wind_text}\n"
+          f"Kullanılabilen modeller: {', '.join(active_models) if active_models else 'Yalnızca Best Match'}\n\n"
+          "MGM RESMÎ UYARI BİLGİSİ\n" + official_text + "\n"
+          "MGM MeteoUYARI: https://www.mgm.gov.tr/meteouyari/turkiye.aspx\n"
+          "MGM Günlük Tahmin: https://www.mgm.gov.tr/tahmin/gunluk-tahmin.aspx\n\n"
+          + re.sub(r"\*\*", "", giyim_tavsiyesi).replace("### ", "")
+      )
+      st.download_button("📥 Meteorolojik Bülteni İndir", report_text.encode("utf-8"), file_name="meteo_expert_report.txt", mime="text/plain")
 
     with tab4:
       cols = [c for c in df.columns if "temperature_2m" in c or "relative_humidity_2m" in c]
