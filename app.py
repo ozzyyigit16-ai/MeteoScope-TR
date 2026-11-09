@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from contextlib import contextmanager
 from geopy.geocoders import Nominatim
 import folium
-from folium.plugins import Fullscreen, LocateControl
+from folium.plugins import Fullscreen, LocateControl, HeatMap
 from folium.raster_layers import TileLayer
 import pandas as pd
 import requests
@@ -22,7 +22,7 @@ from geopy.distance import geodesic
 
 # Sayfa Yapılandırması
 st.set_page_config(
-    page_title="MeteoScope-TR v13 - Türkiye Geneli Meteoroloji & Uzman Paneli",
+    page_title="MeteoScope-TR v14 - Türkiye Geneli Meteoroloji & Uzman Paneli",
     page_icon="🌍",
     layout="wide",
 )
@@ -358,9 +358,145 @@ TURKEY_PROVINCES = {
 "Uşak":(38.6823,29.4082),"Van":(38.5012,43.3730),"Yalova":(40.6500,29.2667),"Yozgat":(39.8181,34.8147),"Zonguldak":(41.4564,31.7987)
 }
 
+# --- V14: Türkiye genelinde ECMWF / GFS / ICON karşılaştırma motoru ---
+TURKEY_MODEL_SOURCES = {
+  "ECMWF IFS": "ecmwf_ifs025",
+  "GFS": "ncep_gfs_seamless",
+  "ICON": "icon_seamless",
+}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_turkey_model_comparison():
+  """Üç bağımsız modelden 81 il merkezi için ilk 3 günlük günlük tahminleri toplar.
+  Kısmi model başarısı korunur; başarısız modelin verisi başka modelle doldurulmaz.
+  """
+  model_results = {label: {} for label in TURKEY_MODEL_SOURCES}
+  model_errors = {}
+  names = list(TURKEY_PROVINCES)
+  batches = [names[i:i+15] for i in range(0, len(names), 15)]
+  fields = ["temperature_2m_max", "temperature_2m_min", "precipitation_sum",
+            "precipitation_probability_max", "snowfall_sum", "wind_gusts_10m_max"]
+
+  def request_batch(model_id, batch):
+    coords = [TURKEY_PROVINCES[n] for n in batch]
+    params = {
+      "latitude": ",".join(f"{x[0]:.4f}" for x in coords),
+      "longitude": ",".join(f"{x[1]:.4f}" for x in coords),
+      "daily": ",".join(fields), "forecast_days": 3,
+      "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+      "precipitation_unit": "mm", "models": model_id,
+    }
+    last_error = None
+    for attempt in range(2):
+      try:
+        resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=16)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict):
+          if payload.get("error"):
+            raise RuntimeError(payload.get("reason", "API model hatası"))
+          payload = [payload]
+        if not isinstance(payload, list) or len(payload) != len(batch):
+          raise RuntimeError("Model yanıtındaki koordinat sayısı uyuşmadı")
+        out = {}
+        for name, item in zip(batch, payload):
+          daily = item.get("daily") or {}
+          dates = daily.get("time") or []
+          if not dates:
+            continue
+          out[name] = {"date": dates[0], "model": model_id}
+          for field in fields:
+            vals = daily.get(field) or []
+            out[name][field] = vals[0] if vals and vals[0] is not None else None
+        return out
+      except Exception as exc:
+        last_error = exc
+        if attempt == 0:
+          time.sleep(0.35)
+    raise RuntimeError(f"{model_id}: {type(last_error).__name__}: {str(last_error)[:160]}")
+
+  # Model bazında batch çağrıları; API'yi aşırı yüklememek için sınırlı paralellik.
+  for label, model_id in TURKEY_MODEL_SOURCES.items():
+    with ThreadPoolExecutor(max_workers=4) as pool:
+      futures = {pool.submit(request_batch, model_id, batch): batch for batch in batches}
+      for fut in as_completed(futures):
+        batch = futures[fut]
+        try:
+          model_results[label].update(fut.result())
+        except Exception as exc:
+          model_errors.setdefault(label, []).append({"iller": batch, "hata": str(exc)[:200]})
+
+  rows = []
+  for city in names:
+    city_models = {label: model_results[label].get(city) for label in TURKEY_MODEL_SOURCES}
+    present = [x for x in city_models.values() if x]
+    row = {"il": city, "models": city_models, "model_count": len(present)}
+    for field in fields:
+      values = [x.get(field) for x in present if x.get(field) is not None]
+      row[field + "_model_mean"] = sum(values) / len(values) if values else None
+      row[field + "_model_min"] = min(values) if values else None
+      row[field + "_model_max"] = max(values) if values else None
+      row[field + "_model_spread"] = (max(values)-min(values)) if len(values) >= 2 else None
+    # Uyum: sıcaklık/yağış için kullanılabilir iki veya daha fazla model gerektirir.
+    temp_spread = row.get("temperature_2m_max_model_spread")
+    rain_spread = row.get("precipitation_sum_model_spread")
+    if len(present) < 2:
+      row["agreement"] = "Yetersiz model"
+    elif temp_spread is not None and temp_spread <= 3 and (rain_spread is None or rain_spread <= 10):
+      row["agreement"] = "Görece uyumlu"
+    elif temp_spread is not None and temp_spread >= 6 or rain_spread is not None and rain_spread >= 20:
+      row["agreement"] = "Belirgin ayrışma"
+    else:
+      row["agreement"] = "Kısmi uyum"
+    rows.append(row)
+  return {"rows": rows, "model_coverage": {label: len(model_results[label]) for label in TURKEY_MODEL_SOURCES},
+          "model_errors": model_errors, "expected": len(TURKEY_PROVINCES),
+          "updated_at": pd.Timestamp.now(tz="Europe/Istanbul").strftime("%d.%m.%Y %H:%M")}
+
+
+def _temperature_color(value):
+  if value is None: return "#64748b"
+  try: value=float(value)
+  except (TypeError, ValueError): return "#64748b"
+  if value <= -5: return "#1d4ed8"
+  if value <= 0: return "#38bdf8"
+  if value <= 10: return "#14b8a6"
+  if value <= 20: return "#84cc16"
+  if value <= 30: return "#f59e0b"
+  return "#ef4444"
+
+
+def build_turkey_temperature_map(rows, metric="temperature_2m_max"):
+  """Türkiye taban haritası üzerinde il merkezi sıcaklık noktaları ve yoğunluk katmanı."""
+  if not rows:
+    return None
+  m = folium.Map(location=[39.0, 35.0], zoom_start=5, tiles="CartoDB positron", control_scale=True)
+  fg = folium.FeatureGroup(name="İl merkezi sıcaklıkları", show=True)
+  heat = []
+  for row in rows:
+    value = row.get(metric)
+    lat, lon = row.get("enlem"), row.get("boylam")
+    if lat is None or lon is None:
+      continue
+    color = _temperature_color(value)
+    popup = f"<b>{html_lib.escape(str(row.get('il','')))}</b><br>{metric}: {value if value is not None else 'Veri yok'} °C<br>Yağış: {row.get('precipitation_sum','—')} mm"
+    folium.CircleMarker(location=[lat,lon], radius=7, color=color, weight=1.5,
+      fill=True, fill_color=color, fill_opacity=.9,
+      tooltip=f"{row.get('il')}: {value if value is not None else '—'} °C",
+      popup=folium.Popup(popup, max_width=260)).add_to(fg)
+    if value is not None:
+      heat.append([lat, lon, max(0.05, min(1.0, (float(value)+20.0)/60.0))])
+  fg.add_to(m)
+  if heat:
+    HeatMap(heat, name="Sıcaklık yoğunluk görünümü", radius=28, blur=22, min_opacity=.25).add_to(m)
+  folium.LayerControl(collapsed=False).add_to(m)
+  folium.plugins.Fullscreen().add_to(m)
+  return m
+
 TURKEY_DAILY_FIELDS = ["temperature_2m_max", "temperature_2m_min", "precipitation_sum",
                        "precipitation_probability_max", "snowfall_sum", "wind_gusts_10m_max", "weather_code"]
-TURKEY_HOURLY_FIELDS = ["precipitation", "wind_gusts_10m", "snowfall", "temperature_2m", "cape"]
+TURKEY_HOURLY_FIELDS = ["precipitation", "wind_gusts_10m", "snowfall", "temperature_2m", "cape",
+                        "freezing_level_height", "snowfall_height"]
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_turkey_national_forecast():
@@ -410,7 +546,25 @@ def fetch_turkey_national_forecast():
       for field in TURKEY_HOURLY_FIELDS:
         vals = [v for v in (hourly.get(field) or []) if v is not None]
         record["hourly_max_"+field] = max(vals) if vals else None
+      # Kar seviyesi değerlendirmesi: API'nin donma seviyesi / snowfall height alanları
+      # ayrı tutulur; kar yağışının kesin ilçe-altitude sınırı olarak yorumlanmaz.
+      freezing_vals = [v for v in (hourly.get("freezing_level_height") or []) if v is not None]
+      snow_height_vals = [v for v in (hourly.get("snowfall_height") or []) if v is not None]
+      record["freezing_level_height_min_m"] = min(freezing_vals) if freezing_vals else None
+      record["snowfall_height_min_m"] = min(snow_height_vals) if snow_height_vals else None
       rain = hourly.get("precipitation") or []
+      # Kayar 3/6 saatlik yağış toplamları: aşırı yağış sinyali tek saat eşiğine bağlı kalmasın.
+      rain_numeric = [float(v) if v is not None else 0.0 for v in rain]
+      hourly_times = hourly.get("time") or []
+      def _rolling_rain_max(window):
+        if len(rain_numeric) < window:
+          return None, None
+        sums = [sum(rain_numeric[i:i+window]) for i in range(len(rain_numeric)-window+1)]
+        idx = max(range(len(sums)), key=lambda i:sums[i])
+        event_idx = idx + window - 1
+        return sums[idx], (hourly_times[event_idx] if event_idx < len(hourly_times) else None)
+      record["max_rain_3h_mm"], record["max_rain_3h_time"] = _rolling_rain_max(3)
+      record["max_rain_6h_mm"], record["max_rain_6h_time"] = _rolling_rain_max(6)
       gust = hourly.get("wind_gusts_10m") or []
       snow = hourly.get("snowfall") or []
       temp = hourly.get("temperature_2m") or []
@@ -437,6 +591,12 @@ def fetch_turkey_national_forecast():
         key = event[0]
         if key not in best or event[1] > best[key][1]: best[key] = event
       record["olaylar"] = [{"il":name,"tip":v[0],"deger":v[1],"birim":v[2],"zaman":v[3],"seviye":v[4]} for v in best.values()]
+      rain_3h = record.get("max_rain_3h_mm")
+      rain_6h = record.get("max_rain_6h_mm")
+      if rain_3h is not None and rain_3h >= 30:
+        record["olaylar"].append({"il":name,"tip":"Kısa süreli yoğun yağış (3 saat)","deger":float(rain_3h),"birim":"mm/3 saat","zaman":record.get("max_rain_3h_time") or dates[0],"seviye":"Yüksek" if rain_3h>=50 else "Orta"})
+      if rain_6h is not None and rain_6h >= 50:
+        record["olaylar"].append({"il":name,"tip":"Birikimli yoğun yağış (6 saat)","deger":float(rain_6h),"birim":"mm/6 saat","zaman":record.get("max_rain_6h_time") or dates[0],"seviye":"Yüksek" if rain_6h>=80 else "Orta"})
       daily_rain = record.get("precipitation_sum")
       if daily_rain is not None and daily_rain >= 50:
         record["olaylar"].append({"il":name,"tip":"Yüksek günlük yağış toplamı","deger":float(daily_rain),"birim":"mm/gün","zaman":dates[0]+" 00:00","seviye":"Yüksek"})
@@ -507,8 +667,41 @@ TURKEY_REGIONAL_CENTERS = {
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_turkey_wide_ews():
   national = fetch_turkey_national_forecast()
+  model_comparison = fetch_turkey_model_comparison()
+  model_by_city = {r["il"]: r for r in model_comparison.get("rows", [])}
+  for row in national.get("rows", []):
+    row["model_comparison"] = model_by_city.get(row.get("il"), {})
   rows = national.get("rows", [])
   alerts = turkey_national_alerts(national)
+  # Uyarı türüne göre üç modelin de aynı risk yönünü destekleyip desteklemediğini not et.
+  for alert in alerts:
+    city_model = model_by_city.get(alert.get("il"), {})
+    city_data = city_model.get("models", {}) if isinstance(city_model, dict) else {}
+    typ = str(alert.get("tip", "")).lower()
+    support = []
+    for model_label, values in city_data.items():
+      if not values:
+        continue
+      if "don" in typ or "sıcaklık" in typ or "buz" in typ:
+        field, threshold = "temperature_2m_min", 0
+      elif "kar" in typ or "snow" in typ:
+        field, threshold = "snowfall_sum", 0.1
+      elif "rüzgâr" in typ or "rüzgar" in typ:
+        field, threshold = "wind_gusts_10m_max", 50
+      elif "yağış" in typ or "rain" in typ:
+        field, threshold = "precipitation_sum", 20
+      else:
+        field, threshold = None, None
+      value = values.get(field) if field else None
+      if value is not None:
+        agrees = (value >= threshold) if field != "temperature_2m_min" else (value <= threshold)
+        if agrees:
+          support.append(model_label)
+    alert["model_destegi"] = len(support)
+    alert["destekleyen_modeller"] = support
+    alert["model_uyumu"] = ("2+ model risk sinyalini destekliyor" if len(support)>=2 else
+                              "Tek model/ sınırlı destek" if len(support)==1 else
+                              "Model desteği doğrulanamadı")
   successful = [r["il"] for r in rows]
   failed = [name for name in TURKEY_PROVINCES if name not in successful]
   regional = {}
@@ -516,11 +709,21 @@ def fetch_turkey_wide_ews():
     city_set=set(cities)
     region_rows=[r for r in rows if r["il"] in city_set]
     region_alerts=[a for a in alerts if a["il"] in city_set]
+    high_alerts=sum(1 for a in region_alerts if a.get("seviye")=="Yüksek")
+    alert_city_count=len({a.get("il") for a in region_alerts})
+    agreement_counts={"Görece uyumlu":0,"Kısmi uyum":0,"Belirgin ayrışma":0,"Yetersiz model":0}
+    for city_row in region_rows:
+      agreement=(city_row.get("model_comparison") or {}).get("agreement")
+      if agreement in agreement_counts: agreement_counts[agreement]+=1
     regional[region]={"checked":len(region_rows),"expected":len(cities),"alerts":region_alerts,
+                      "alert_city_count":alert_city_count,"high_alerts":high_alerts,
                       "max_rain":max((r.get("precipitation_sum") for r in region_rows if r.get("precipitation_sum") is not None),default=None),
-                      "min_temp":min((r.get("temperature_2m_min") for r in region_rows if r.get("temperature_2m_min") is not None),default=None)}
+                      "min_temp":min((r.get("temperature_2m_min") for r in region_rows if r.get("temperature_2m_min") is not None),default=None),
+                      "model_agreement":agreement_counts,
+                      "risk_status":"Yüksek risk sinyali" if high_alerts else "Risk sinyali var" if region_alerts else "Eşik aşımı saptanmadı" if len(region_rows)==len(cities) else "Eksik veri / bilinmiyor"}
   return {"alerts":alerts,"successful_centers":successful,"failed_centers":[{"bolge":x,"hata":"İl verisi alınamadı"} for x in failed],
-          "checked_centers":len(TURKEY_PROVINCES),"regional":regional,"national":national}
+          "checked_centers":len(TURKEY_PROVINCES),"regional":regional,"national":national,
+          "model_comparison":model_comparison}
 
 
 # --- GİZLİ YÖNETİCİ PANELİ ---
@@ -547,7 +750,7 @@ with st.sidebar:
 
 
 # --- ANA UYGULAMA ---
-st.title("🌍 MeteoScope-TR v13 · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
+st.title("🌍 MeteoScope-TR v14 · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
 
 # --- 🚨 TÜRKİYE GENELİ ERKEN UYARI MASASI ---
 ews_result = fetch_turkey_wide_ews()
@@ -1460,20 +1663,52 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         reg=ews_result.get("regional",{})
         reg_rows=[]
         for region,info in reg.items():
-          reg_rows.append({"Bölge":region,"Verisi alınan il":f"{info['checked']}/{info['expected']}","En düşük tahmin":f"{info['min_temp']:.1f} °C" if info['min_temp'] is not None else "Veri yok","En yüksek il yağışı":f"{info['max_rain']:.1f} mm" if info['max_rain'] is not None else "Veri yok","Risk sinyali":len(info['alerts'])})
+          reg_rows.append({"Bölge":region,"Veri kapsamı":f"{info['checked']}/{info['expected']}","Durum":info.get("risk_status","Bilinmiyor"),"İl sayısı riskli":info.get("alert_city_count",0),"Yüksek risk sinyali":info.get("high_alerts",0),"En düşük tahmin":f"{info['min_temp']:.1f} °C" if info['min_temp'] is not None else "Veri yok","En yüksek il yağışı":f"{info['max_rain']:.1f} mm" if info['max_rain'] is not None else "Veri yok","Model ayrışması":info.get("model_agreement",{}).get("Belirgin ayrışma",0)})
         st.dataframe(pd.DataFrame(reg_rows),hide_index=True,use_container_width=True)
         st.markdown("#### İl bazında sıcaklık ve yağış")
         sort_col=st.selectbox("Sıralama",["temperature_2m_max","temperature_2m_min","precipitation_sum","wind_gusts_10m_max"],format_func=lambda x:{"temperature_2m_max":"En yüksek sıcaklık","temperature_2m_min":"En düşük sıcaklık","precipitation_sum":"Toplam yağış","wind_gusts_10m_max":"Rüzgâr hamlesi"}[x],key="national_sort")
-        view=ndf[["il",sort_col,"temperature_2m_min","temperature_2m_max","precipitation_sum","precipitation_probability_max","snowfall_sum","wind_gusts_10m_max"]].copy()
+        view=ndf[["il",sort_col,"temperature_2m_min","temperature_2m_max","precipitation_sum","max_rain_3h_mm","max_rain_6h_mm","precipitation_probability_max","snowfall_sum","freezing_level_height_min_m","snowfall_height_min_m","wind_gusts_10m_max"]].copy()
         view=view.sort_values(sort_col,ascending=(sort_col=="temperature_2m_min"),na_position="last")
-        view.columns=["İl","Sıralama ölçütü","Min °C","Maks °C","Yağış mm","Yağış olasılığı %","Kar cm","Rüzgâr hamlesi km/sa"]
+        view.columns=["İl","Sıralama ölçütü","Min °C","Maks °C","Yağış mm/gün","Maks 3 saat mm","Maks 6 saat mm","Yağış olasılığı %","Kar cm","En düşük donma seviyesi m","En düşük kar yağışı seviyesi m","Rüzgâr hamlesi km/sa"]
         st.dataframe(view,hide_index=True,use_container_width=True)
-        st.markdown("#### Türkiye haritası · il merkezleri")
-        map_df=ndf.dropna(subset=["temperature_2m_max"])[["il","enlem","boylam","temperature_2m_max","precipitation_sum"]].copy()
-        if not map_df.empty:
-          map_df["boyut"]=8
-          st.map(map_df.rename(columns={"enlem":"lat","boylam":"lon"})[["lat","lon"]],zoom=5)
-          st.caption("Harita noktaları il merkezlerini temsil eder; renkli sıcaklık katmanı yerine ayrıntılı sayısal tablo yukarıdadır.")
+        st.markdown("#### Türkiye haritası · sıcaklık noktaları ve yoğunluk katmanı")
+        map_metric=st.selectbox("Harita sıcaklık katmanı",["temperature_2m_max","temperature_2m_min"],
+          format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v14_turkey_map_metric")
+        turkey_map=build_turkey_temperature_map(national_rows,map_metric)
+        if turkey_map is not None:
+          st_folium(turkey_map,width=None,height=520,key="v14_turkey_temperature_map")
+          st.caption("Renkli noktalar il merkezi tahminlerini, yoğunluk katmanı ise bunların görsel dağılımını gösterir. İlçe/dağlık mikroklima çözünürlüğü değildir.")
+        st.markdown("#### V14 · ECMWF / GFS / ICON model karşılaştırması")
+        mc=ews_result.get("model_comparison",{})
+        cov=mc.get("model_coverage",{})
+        if cov:
+          mcols=st.columns(3)
+          for i,(model_name,count) in enumerate(cov.items()):
+            mcols[i].metric(model_name, f"{count}/81 il")
+          mdf=pd.DataFrame(mc.get("rows",[]))
+          if not mdf.empty:
+            mdf=mdf[mdf["model_count"]>0].copy()
+            if not mdf.empty:
+              mdf["temperature_2m_max_model_mean"]=pd.to_numeric(mdf["temperature_2m_max_model_mean"],errors="coerce").round(1)
+              mdf["temperature_2m_max_model_spread"]=pd.to_numeric(mdf["temperature_2m_max_model_spread"],errors="coerce").round(1)
+              mdf["precipitation_sum_model_mean"]=pd.to_numeric(mdf["precipitation_sum_model_mean"],errors="coerce").round(1)
+              mdf["precipitation_sum_model_spread"]=pd.to_numeric(mdf["precipitation_sum_model_spread"],errors="coerce").round(1)
+              mview=mdf[["il","model_count","temperature_2m_max_model_mean","temperature_2m_max_model_spread","precipitation_sum_model_mean","precipitation_sum_model_spread","agreement"]].copy()
+              mview.columns=["İl","Model sayısı","Ort. gündüz °C","Sıcaklık farkı °C","Ort. yağış mm","Yağış farkı mm","Model uyumu"]
+              st.dataframe(mview,hide_index=True,use_container_width=True)
+              diverging=mdf[mdf["agreement"]=="Belirgin ayrışma"]["il"].tolist()
+              if diverging:
+                st.warning("Modellerin belirgin ayrıştığı iller: "+", ".join(diverging[:20])+ ("…" if len(diverging)>20 else "")+". Bu bölgelerde tahmin belirsizliği daha yüksek olabilir.")
+              else:
+                st.info("Verisi alınan il merkezlerinde model ayrışması belirgin eşiklere ulaşmadı; bu kesinlik garantisi değildir.")
+          if mc.get("model_errors"):
+            with st.expander("Model veri hataları / eksik kapsam"):
+              for model_name, errs in mc["model_errors"].items():
+                st.write(f"**{model_name}**")
+                for err in errs: st.write(f"{', '.join(err['iller'])}: {err['hata']}")
+        else:
+          st.info("Model karşılaştırması şu anda alınamadı. Tek model tahmini çoklu model konsensüsü olarak sunulmaz.")
+
         st.markdown("#### Günün Türkiye özeti")
         hottest=ndf.loc[pd.to_numeric(ndf["temperature_2m_max"],errors="coerce").idxmax()] if temps.size else None
         coldest=ndf.loc[pd.to_numeric(ndf["temperature_2m_min"],errors="coerce").idxmin()] if pd.to_numeric(ndf["temperature_2m_min"],errors="coerce").notna().any() else None
@@ -1495,7 +1730,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         national_alerts=turkey_national_alerts(national)
         st.markdown("#### 81 il erken uyarı taraması")
         if national_alerts:
-          for a in national_alerts[:30]: st.warning(f"**{a['il']} · {a['tip']}** — {a['deger']:.1f} {a['birim']} · {pd.to_datetime(a['zaman']).strftime('%d.%m %H:%M')} · {a['seviye']} seviye")
+          for a in national_alerts[:30]: st.warning(f"**{a['il']} · {a['tip']}** — {a['deger']:.1f} {a['birim']} · {pd.to_datetime(a['zaman']).strftime('%d.%m %H:%M')} · {a['seviye']} seviye · {a.get('model_uyumu','Model uyumu hesaplanmadı')}")
           if len(national_alerts)>30: st.caption(f"İlk 30 kayıt gösteriliyor; toplam {len(national_alerts)} risk sinyali bulundu.")
         else: st.success("Mevcut verisi alınan il merkezlerinde tanımlı erken uyarı eşikleri aşılmadı. Bu, risk bulunmadığının veya resmî uyarı olmadığının garantisi değildir.")
         svg=build_turkey_share_svg(national_rows,pd.Timestamp.now(tz="Europe/Istanbul").strftime("%d.%m.%Y"))
