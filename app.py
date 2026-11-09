@@ -239,35 +239,98 @@ def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, max_ruzga
   return "### 👕 Giyim ve Hazırlık Önerisi\n" + "\n".join(f"- {item}" for item in oneriler)
 
 
+def gunluk_net_giyim_tavsiyesi(day_df, day_label):
+  """Tek bir günün saatlik tahminlerinden kısa, anlaşılır kıyafet önerisi üretir."""
+  if day_df is None or day_df.empty or "temperature_2m" not in day_df.columns:
+    return f"**{day_label}:** Yeterli sıcaklık tahmini alınamadığı için güvenilir giyim önerisi oluşturulamadı."
+  def vals(column):
+    if column not in day_df.columns:
+      return pd.Series(dtype=float)
+    return pd.to_numeric(day_df[column], errors="coerce").dropna()
+  temps = vals("temperature_2m")
+  if temps.empty:
+    return f"**{day_label}:** Sıcaklık verisi eksik; kıyafet önerisi oluşturulamadı."
+  tmin, tmax = float(temps.min()), float(temps.max())
+  feels = vals("apparent_temperature")
+  ref_min = min(tmin, float(feels.min())) if not feels.empty else tmin
+  precip = vals("precipitation")
+  prob = vals("precipitation_probability")
+  snow = vals("snowfall")
+  gust = vals("wind_gusts_10m")
+  wind = vals("wind_speed_10m")
+  max_gust = float(gust.max()) if not gust.empty else (float(wind.max()) if not wind.empty else 0.0)
+  rain_mm = float(precip.sum()) if not precip.empty else 0.0
+  rain_prob = float(prob.max()) if not prob.empty else 0.0
+  snow_cm = float(snow.sum()) if not snow.empty else 0.0
+
+  if ref_min <= 0:
+    outfit = "kalın, ısı yalıtımlı mont; bere ve eldiven"
+  elif ref_min < 7:
+    outfit = "kalın mont veya sıcak tutan kaban"
+  elif ref_min < 13:
+    outfit = "orta kalınlıkta mont ve uzun kollu katman"
+  elif tmax < 20:
+    outfit = "ince ceket veya hırka üzerine mevsimlik kıyafet"
+  elif tmax < 27:
+    outfit = "hafif, nefes alabilen kıyafet; sabah-akşam için ince bir katman"
+  else:
+    outfit = "ince, açık renkli ve nefes alabilen kıyafet"
+
+  extras = []
+  if rain_mm >= 1 or rain_prob >= 50:
+    extras.append("suya dayanıklı yağmurluk ve kapalı ayakkabı al")
+  if snow_cm >= 0.2:
+    extras.append("su geçirmez, tabanı kaymaz bot giy")
+  if max_gust >= 50:
+    extras.append("rüzgârı kesen kapüşonlu dış katman kullan; şemsiye tercih etme")
+  elif max_gust >= 30:
+    extras.append("rüzgârlık bulundur")
+  if tmax - tmin >= 9:
+    extras.append("sabah ve akşam serinliği için ek katman taşı")
+  sentence = f"**{day_label}: {outfit.capitalize()} tercih et.** Beklenen sıcaklık {tmin:.0f}–{tmax:.0f} °C."
+  if extras:
+    sentence += " Ayrıca " + "; ".join(extras) + "."
+  else:
+    sentence += " Belirgin yağış veya kuvvetli rüzgâr sinyali öne çıkmıyor."
+  return sentence
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_mgm_official_warnings():
-  """MGM'nin resmî günlük tahmin sayfasındaki UYARILAR bölümünü alır."""
+  """MGM günlük tahmin sayfasındaki uyarı alanını ihtiyatlı biçimde okur.
+
+  Sayfanın geri kalanında geçen benzer ifadelerden hareketle 'uyarı yok' sonucu üretmez.
+  Uyarı alanı güvenilir biçimde ayrıştırılamazsa status='unavailable' döndürür.
+  """
   urls = [
       "https://www.mgm.gov.tr/tahmin/gunluk-tahmin.aspx",
       "https://www.mgm.gov.tr/pda/gunluk-tahmin-PDA.aspx",
   ]
   last_error = None
+  no_warning_patterns = (
+      r"güncel\s+meteorolojik\s+uyarı\s+bulunmamaktadır",
+      r"herhangi\s+bir\s+meteorolojik\s+uyarı\s+bulunmamaktadır",
+      r"meteorolojik\s+uyarı\s+bulunmamaktadır",
+      r"uyarı\s+bulunmamaktadır",
+  )
   for url in urls:
     try:
-      response = requests.get(url, timeout=12, headers={"User-Agent": "MeteoScope-TR/1.0"})
+      response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 MeteoScope-TR/1.0"})
       response.raise_for_status()
-      raw = response.text
-      # Navigasyon/biçimlendirme etiketlerini kaldırıp uyarı bölümünü ayıkla.
-      raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.I | re.S)
-      plain = re.sub(r"<[^>]+>", " ", raw)
-      plain = html_lib.unescape(plain)
-      plain = re.sub(r"\s+", " ", plain)
-      match = re.search(r"\bUYARILAR\b(.*?)(?:\bBÖLGELERİMİZDE HAVA\b|\bMARMARA\b)", plain, flags=re.I | re.S)
-      if match:
-        warning_text = re.sub(r"\s+", " ", match.group(1)).strip(" :-–—|")
-        warning_text = re.sub(r"^(?:UYARILAR?\s*)+", "", warning_text, flags=re.I).strip()
-        if warning_text and not re.fullmatch(r"[-–—| ]*", warning_text):
-          if "herhangi bir meteorolojik uyarı bulunmamaktadır" in warning_text.casefold():
-            return {"status": "none", "text": "MGM günlük tahmin sayfasında herhangi bir meteorolojik uyarı bulunmadığı belirtiliyor.", "url": url}
-          return {"status": "active", "text": warning_text[:5000], "url": url}
-      if "herhangi bir meteorolojik uyarı bulunmamaktadır" in plain.casefold():
-        return {"status": "none", "text": "MGM günlük tahmin sayfasında herhangi bir meteorolojik uyarı bulunmadığı belirtiliyor.", "url": url}
-      last_error = "MGM sayfası yanıt verdi ancak uyarı bölümü okunamadı."
+      raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", response.text, flags=re.I | re.S)
+      plain = html_lib.unescape(re.sub(r"<[^>]+>", " ", raw))
+      plain = re.sub(r"\s+", " ", plain).strip()
+      match = re.search(r"\bUYARILAR\b(.*?)(?:\bBÖLGELERİMİZDE HAVA\b|\bMARMARA\b|\bİL İL HAVA\b)", plain, flags=re.I | re.S)
+      if not match:
+        last_error = "MGM sayfası açıldı ancak resmî uyarı bölümü güvenilir biçimde ayrıştırılamadı."
+        continue
+      warning_text = re.sub(r"\s+", " ", match.group(1)).strip(" :-–—|")
+      warning_text = re.sub(r"^(?:UYARILAR?\s*)+", "", warning_text, flags=re.I).strip()
+      if any(re.search(pattern, warning_text, flags=re.I) for pattern in no_warning_patterns):
+        return {"status": "none", "text": "MGM'nin günlük tahmin sayfasındaki UYARILAR bölümünde güncel meteorolojik uyarı bulunmadığı açıkça belirtiliyor.", "url": url}
+      if warning_text and not re.fullmatch(r"[-–—| ]*", warning_text):
+        return {"status": "active", "text": warning_text[:5000], "url": url}
+      last_error = "MGM uyarı bölümü boş veya okunamayan biçimde döndü; uyarı yok sonucu çıkarılmadı."
     except Exception as exc:
       last_error = f"MGM uyarı servisine ulaşılamadı: {type(exc).__name__}"
   return {"status": "unavailable", "text": last_error or "Resmî uyarı bilgisi şu anda alınamadı.", "url": "https://www.mgm.gov.tr/meteouyari/turkiye.aspx"}
@@ -1547,7 +1610,7 @@ if show_observed_radar or show_radar_nowcast:
                   max_native_zoom=7, max_zoom=18, show=True).add_to(m)
         st.caption("Tahmin katmanı RainViewer nowcast ürünüdür; uzun vadeli hava tahmini değildir. Zaman: " + _format_radar_timestamp(radar_layers.get("forecast_time")))
       else:
-        st.info("RainViewer şu anda kısa vadeli nowcast karesi sunmuyor; tahmin katmanı gösterilemedi.")
+        st.info("RainViewer bu istekte kısa vadeli nowcast karesi yayımlamamış. Bu, konum verisinin bozuk olduğu anlamına gelmez; harita tahmin karosu şu anda sağlayıcıdan alınamıyor. Mevcut yağış için ‘Mevcut yağış radarı’nı açabilir, seçili konumun saatlik yağış tahminini aşağıdaki hava tahmini bölümünden inceleyebilirsin.")
   except Exception as radar_exc:
     st.warning(f"Yağış katmanları şu anda alınamadı: {radar_exc}")
 
@@ -1909,7 +1972,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         if mgm_national_warning.get("status") == "active":
           st.warning(mgm_national_warning.get("text", "MGM uyarısı yayımlandı."))
         elif mgm_national_warning.get("status") == "none":
-          st.success(mgm_national_warning.get("text", "MGM günlük raporunda uyarı bulunmadığı belirtiliyor."))
+          st.info(mgm_national_warning.get("text", "MGM günlük tahmin raporunun uyarı bölümünde güncel uyarı bulunmadığı açıkça belirtiliyor."))
         else:
           st.info("MGM resmî uyarı metni şu anda alınamadı; uyarı var/yok şeklinde çıkarım yapılmadı. [MGM MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx)")
         national_alerts=turkey_national_alerts(national)
@@ -1985,11 +2048,17 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         rep_wind_series = pd.to_numeric(df_3days["wind_speed_10m"], errors="coerce").dropna()
       rep_wind = float(rep_wind_series.max()) if not rep_wind_series.empty else None
       rep_prob = float(rep_prob_series.max()) if not rep_prob_series.empty else None
-      giyim_tavsiyesi = giyim_onerisi_olustur(
-          current_data.get("temperature_2m"), rep_precip, rep_snow, rep_wind,
-          hissedilen_sicaklik=current_data.get("apparent_temperature"),
-          min_sicaklik=rep_min, max_sicaklik=rep_max,
-          yagis_olasiligi=rep_prob,
+      # Giyim önerisi bugünün ve yarının saatlik tahminlerinden ayrı ayrı hazırlanır.
+      day_forecast = df_3days.copy()
+      if not day_forecast.empty and "time" in day_forecast.columns:
+        day_forecast["_forecast_date"] = pd.to_datetime(day_forecast["time"], errors="coerce").dt.date
+      today_df = day_forecast[day_forecast["_forecast_date"] == today] if not day_forecast.empty and "_forecast_date" in day_forecast.columns else pd.DataFrame()
+      tomorrow_date = today + timedelta(days=1)
+      tomorrow_df = day_forecast[day_forecast["_forecast_date"] == tomorrow_date] if not day_forecast.empty and "_forecast_date" in day_forecast.columns else pd.DataFrame()
+      giyim_tavsiyesi = (
+          "### 👕 Bugün ve Yarın İçin Net Giyim Tavsiyesi\n"
+          + gunluk_net_giyim_tavsiyesi(today_df, "Bugün") + "\n\n"
+          + gunluk_net_giyim_tavsiyesi(tomorrow_df, "Yarın")
       )
       official_warning = fetch_mgm_official_warnings()
       selected_location = st.session_state.get("location_label", "Seçilen konum")
@@ -2010,14 +2079,14 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.warning(official_warning["text"])
         st.caption("Kaynak: Meteoroloji Genel Müdürlüğü günlük tahmin raporu. Bu bölüm ülke geneli resmî uyarı metnini gösterir; seçilen nokta için il/ilçe kapsamını resmî MeteoUYARI haritasından ayrıca kontrol edebilirsiniz.")
       elif official_warning["status"] == "none":
-        st.success(official_warning["text"])
+        st.info(official_warning["text"])
       else:
         st.info("MGM'nin resmî uyarı metni şu anda uygulamaya alınamadı. Uyarı var/yok şeklinde tahmin yürütülmedi; güncel durumu resmî sayfadan kontrol edin. " + official_warning["text"])
       st.markdown("[MGM Resmî MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx) · [MGM günlük tahmin ve uyarı raporunu aç](https://www.mgm.gov.tr/tahmin/gunluk-tahmin.aspx)")
 
       st.markdown("---")
       st.markdown(giyim_tavsiyesi)
-      st.caption("Öneriler, seçili konumun tahmin verilerinden otomatik eşik/kurallar ile oluşturulur; kişiye özel meteoroloji uzmanı değerlendirmesi değildir. Resmî uyarı ve tedbirlerde MGM duyurularını esas alın.")
+      st.caption("Giyim tavsiyeleri seçili konumun bugüne ve yarına ait saatlik sıcaklık, hissedilen sıcaklık, yağış, kar ve rüzgâr tahminlerinden otomatik oluşturulur. Veri eksikse kesin öneri uydurulmaz.")
       st.markdown("[MGM meteorolojik hadiseler ve MeteoUYARI açıklamaları](https://www.mgm.gov.tr/Meteouyari/meteouyari-nedir.aspx) · [MGM meteorolojik şiddet sınıflandırması](https://www.mgm.gov.tr/site/yardim1.aspx?=HadSid)")
 
       current_temp_text = f"{current_data['temperature_2m']:.1f} °C" if current_data.get("temperature_2m") is not None else "Veri yok"
