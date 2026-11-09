@@ -769,8 +769,28 @@ with st.sidebar:
 # --- ANA UYGULAMA ---
 st.title("🌍 MeteoScope-TR · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
 
-# Türkiye geneli erken uyarı bilgisi, ayrı sekmede sunulur; ana ekranı kalabalıklaştırmaz.
-st.caption(f"🚨 Türkiye geneli erken uyarı taraması hazır: {len(ews_result.get('successful_centers', []))}/81 il verisi · Ayrıntılar ‘Türkiye Geneli Erken Uyarı’ sekmesinde.")
+# Türkiye geneli erken uyarı verisini kullanmadan önce oluştur.
+# Önceki sürümde ews_result tanımlanmadan aşağıda kullanıldığı için NameError oluşuyordu.
+try:
+  ews_result = fetch_turkey_wide_ews()
+  if not isinstance(ews_result, dict):
+    raise TypeError("Türkiye geneli EWS sonucu beklenen sözlük formatında değil.")
+except Exception as e:
+  ews_result = {
+    "alerts": [],
+    "successful_centers": [],
+    "failed_centers": [{"bolge": "Türkiye geneli", "hata": str(e)}],
+    "regional": {},
+    "national": {"updated_at": "veri alınamadı", "rows": []},
+    "model_comparison": {"rows": []},
+    "error": str(e),
+  }
+
+# Türkiye geneli erken uyarı bilgisi ayrı sekmede sunulur; ana ekranı kalabalıklaştırmaz.
+if ews_result.get("error"):
+  st.caption("🚨 Türkiye geneli erken uyarı verisi şu anda alınamadı. Ayrıntılar ‘Türkiye Geneli Erken Uyarı’ sekmesinde.")
+else:
+  st.caption(f"🚨 Türkiye geneli erken uyarı taraması hazır: {len(ews_result.get('successful_centers', []))}/81 il verisi · Ayrıntılar ‘Türkiye Geneli Erken Uyarı’ sekmesinde.")
 
 st.markdown("Dünya haritasında arama yapın veya haritaya tıklayın. Arama kutusu ve işaretçi çift yönlü senkronize edilir; harita seçimi arama alanına yazılır.")
 
