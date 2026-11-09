@@ -20,9 +20,26 @@ import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from geopy.distance import geodesic
 
+
+def _safe_number(value, default=None):
+  """Convert scalars (including pandas/numpy values) to finite floats safely."""
+  try:
+    if value is None:
+      return default
+    # Avoid treating NaN/None/empty strings as numeric values.
+    if isinstance(value, str) and not value.strip():
+      return default
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number):
+      return default
+    number = float(number)
+    return number if number == number and abs(number) != float("inf") else default
+  except (TypeError, ValueError, OverflowError):
+    return default
+
 # Sayfa Yapılandırması
 st.set_page_config(
-    page_title="MeteoScope-TR v14 - Türkiye Geneli Meteoroloji & Uzman Paneli",
+    page_title="MeteoScope-TR - Türkiye Geneli Meteoroloji & Uzman Paneli",
     page_icon="🌍",
     layout="wide",
 )
@@ -750,27 +767,10 @@ with st.sidebar:
 
 
 # --- ANA UYGULAMA ---
-st.title("🌍 MeteoScope-TR v14 · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
+st.title("🌍 MeteoScope-TR · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
 
-# --- 🚨 TÜRKİYE GENELİ ERKEN UYARI MASASI ---
-ews_result = fetch_turkey_wide_ews()
-turkiye_riskler = ews_result["alerts"]
-checked_count = len(ews_result["successful_centers"])
-failed_count = len(ews_result["failed_centers"])
-st.caption(f"Türkiye geneli tarama: {checked_count}/{ews_result['checked_centers']} il merkezi verisi alındı. Günlük tahminler Open-Meteo modellerinden derlenir; eşik taraması resmî MGM/AFAD uyarısı değildir. Veri zamanı: {ews_result['national'].get('updated_at', 'bilinmiyor')}.")
-if turkiye_riskler:
-  st.warning("⚠️ **TÜRKİYE GENELİ 81 İL TARAMASINDA METEOROLOJİK RİSK SİNYALLERİ BULUNDU**")
-  for r in turkiye_riskler[:30]:
-    t_fmt = pd.to_datetime(r['zaman']).strftime('%d.%m.%Y %H:%M')
-    st.warning(f"**{r['il']}** · {r['tip']} ({r['deger']:.1f} {r['birim']}) · {t_fmt} · {r['seviye']} seviye")
-  if len(turkiye_riskler) > 30:
-    st.caption(f"Toplam {len(turkiye_riskler)} risk sinyali bulundu; üst bölümde ilk 30 kayıt gösteriliyor.")
-elif checked_count == 0:
-  st.info("⚪ **Türkiye geneli durumu bilinmiyor:** Hiçbir stratejik merkezden veri alınamadı. Bu sonuç stabil hava anlamına gelmez.")
-elif failed_count:
-  st.info(f"⚪ **Kısmi kapsama:** Yanıt veren {checked_count} merkezde eşik aşımı saptanmadı; {failed_count} merkez kontrol edilemedi. Türkiye geneli için kesin stabil sonucu verilemez.")
-else:
-  st.success("🟢 **Verisi alınan il merkezlerinde tanımlı risk eşikleri aşılmadı.** Bu otomatik tarama resmî uyarı yerine geçmez; ilçe ve yerel koşullar farklılık gösterebilir.")
+# Türkiye geneli erken uyarı bilgisi, ayrı sekmede sunulur; ana ekranı kalabalıklaştırmaz.
+st.caption(f"🚨 Türkiye geneli erken uyarı taraması hazır: {len(ews_result.get('successful_centers', []))}/81 il verisi · Ayrıntılar ‘Türkiye Geneli Erken Uyarı’ sekmesinde.")
 
 st.markdown("Dünya haritasında arama yapın veya haritaya tıklayın. Arama kutusu ve işaretçi çift yönlü senkronize edilir; harita seçimi arama alanına yazılır.")
 
@@ -1031,61 +1031,124 @@ if seyahat_acik:
                       route_source += " · demiryolu şehir koridoru: " + " → ".join(rail_path)
 
                 if route_geometry:
-                  # Select 5 representative points along actual road geometry, or endpoints for schematic routes.
-                  if len(route_geometry)>2:
-                    indices=sorted(set([0, len(route_geometry)//4, len(route_geometry)//2, (3*len(route_geometry))//4, len(route_geometry)-1]))
-                    sample_pts=[route_geometry[i] for i in indices]
+                  # Route sampling: distribute weather checks along the corridor, not only at endpoints.
+                  # For road routes, use distance-based density; for schematic connections, interpolate.
+                  route_km = (route_distance_m / 1000.0) if route_distance_m else straight_km
+                  n_samples = max(5, min(15, int(route_km / 100.0) + 2))
+                  if len(route_geometry) > 2:
+                    sample_indices = sorted(set(round(i * (len(route_geometry)-1) / (n_samples-1)) for i in range(n_samples)))
+                    sample_pts = [route_geometry[i] for i in sample_indices]
                   else:
-                    sample_pts=route_geometry
-                  route_weather=[]
-                  weather_vars="temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
-                  def get_date_weather(lat,lon):
+                    # Schematic route only: sample between endpoints and label that limitation.
+                    sample_pts = [(lat_b + (lat_v-lat_b)*i/(n_samples-1),
+                                   lon_b + (lon_v-lon_b)*i/(n_samples-1)) for i in range(n_samples)]
+
+                  weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
+                  def get_date_weather(lat, lon):
                     try:
-                      params={"latitude":lat,"longitude":lon,"hourly":weather_vars,
-                        "start_date":planlanan_tarih.isoformat(),"end_date":planlanan_tarih.isoformat(),
-                        "forecast_days":16,"timezone":"auto","wind_speed_unit":"kmh","precipitation_unit":"mm"}
-                      data=requests.get("https://api.open-meteo.com/v1/forecast",params=params,timeout=12).json()
-                      hourly=data.get("hourly",{}); times=hourly.get("time",[])
-                      if not times: return None
-                      # Pick midday sample (12:00), fallback to first available hour.
-                      idx=next((i for i,t in enumerate(times) if str(t).endswith("T12:00")),0)
-                      return {k:(hourly.get(k,[None]*len(times))[idx] if idx<len(hourly.get(k,[])) else None) for k in weather_vars.split(",")}
-                    except Exception: return None
-                  with ThreadPoolExecutor(max_workers=min(5,len(sample_pts))) as ex:
-                    route_weather=list(ex.map(lambda xy:get_date_weather(xy[0],xy[1]), sample_pts))
+                      params = {
+                        "latitude": round(float(lat), 4), "longitude": round(float(lon), 4),
+                        "hourly": weather_vars,
+                        "start_date": planlanan_tarih.isoformat(), "end_date": planlanan_tarih.isoformat(),
+                        "forecast_days": 16, "timezone": "auto", "wind_speed_unit": "kmh",
+                        "precipitation_unit": "mm"
+                      }
+                      resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
+                      resp.raise_for_status()
+                      payload = resp.json()
+                      if payload.get("error"):
+                        return {"_error": str(payload.get("reason", payload.get("error")))}
+                      hourly = payload.get("hourly") or {}
+                      times = hourly.get("time") or []
+                      if not times:
+                        return {"_error": "API yanıtında saatlik tahmin bulunamadı"}
+                      # Analyze the entire selected date, not a single arbitrary noon hour.
+                      day_indices = [i for i, t in enumerate(times) if str(t).startswith(planlanan_tarih.isoformat())]
+                      if not day_indices:
+                        return {"_error": "Seçilen tarih tahmin kapsamı dışında"}
+                      def vals(key):
+                        arr = hourly.get(key) or []
+                        return [arr[i] for i in day_indices if i < len(arr) and arr[i] is not None]
+                      temps, precip, snow, wind, gust = (vals(k) for k in ["temperature_2m", "precipitation", "snowfall", "wind_speed_10m", "wind_gusts_10m"])
+                      codes = vals("weather_code")
+                      # Risk evaluation uses daily extremes/accumulations; retain time of peak gust/rain.
+                      gust_arr = hourly.get("wind_gusts_10m") or []
+                      precip_arr = hourly.get("precipitation") or []
+                      peak_gust_i = max(day_indices, key=lambda i: gust_arr[i] if i < len(gust_arr) and gust_arr[i] is not None else -1)
+                      peak_rain_i = max(day_indices, key=lambda i: precip_arr[i] if i < len(precip_arr) and precip_arr[i] is not None else -1)
+                      return {
+                        "temperature_2m": min(temps) if temps else None,
+                        "temperature_max": max(temps) if temps else None,
+                        "precipitation": sum(precip) if precip else None,
+                        "precipitation_peak": max(precip) if precip else None,
+                        "snowfall": sum(snow) if snow else None,
+                        "wind_speed_10m": max(wind) if wind else None,
+                        "wind_gusts_10m": max(gust) if gust else None,
+                        "weather_code": codes[0] if codes else None,
+                        "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
+                        "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
+                        "_error": None
+                      }
+                    except Exception as exc:
+                      return {"_error": str(exc)}
+
+                  with ThreadPoolExecutor(max_workers=min(8, len(sample_pts))) as ex:
+                    route_weather = list(ex.map(lambda xy: get_date_weather(xy[0], xy[1]), sample_pts))
 
                   risk_markers=[]; report_rows=[]; route_status="unknown"
-                  valid_weather_count = sum(1 for item in route_weather if item)
+                  valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
                   if valid_weather_count:
                     route_status = "green" if valid_weather_count == len(sample_pts) else "partial"
-                  for i,(xy,wx) in enumerate(zip(sample_pts,route_weather)):
-                    if not wx:
-                      report_rows.append({"Rota noktası":f"Nokta {i+1}","Hava durumu":"Seçilen tarih için veri alınamadı","Risk":"Bilinmiyor"})
+                  for i, (xy, wx) in enumerate(zip(sample_pts, route_weather)):
+                    point_name = f"Rota kesimi {i+1}/{len(sample_pts)}"
+                    if not wx or wx.get("_error") or not any(wx.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")):
+                      err = (wx or {}).get("_error", "Tahmin verisi yok")
+                      report_rows.append({"Rota noktası":point_name,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err})
                       continue
-                    temp=wx.get("temperature_2m"); snow=wx.get("snowfall"); precip=wx.get("precipitation")
+                    temp=wx.get("temperature_2m"); temp_max=wx.get("temperature_max")
+                    snow=wx.get("snowfall"); precip=wx.get("precipitation")
+                    peak_precip=wx.get("precipitation_peak")
                     wind=wx.get("wind_speed_10m"); gust=wx.get("wind_gusts_10m")
                     risks=[]; severity="green"
-                    if temp is not None and precip is not None and temp<=0 and (snow is not None and snow>0 or precip>0): risks.append("Don/buzlanma ihtimali"); severity="red"
-                    if snow is not None and snow>0: risks.append("Kar yağışı"); severity="red"
-                    if precip is not None and precip>=10: risks.append("Kuvvetli yağış"); severity="orange" if severity!="red" else severity
-                    if gust is not None and gust>=60: risks.append("Kuvvetli rüzgâr hamlesi"); severity="red"
-                    elif gust is not None and gust>=40: risks.append("Rüzgâr hamlesi yüksek"); severity="orange" if severity!="red" else severity
+                    if temp is not None and temp<=0 and ((snow is not None and snow>0) or (precip is not None and precip>0)):
+                      risks.append("Don/buzlanma ihtimali"); severity="red"
+                    if snow is not None and snow>=1:
+                      risks.append(f"Kar yağışı (günlük {snow:.1f} cm)"); severity="red"
+                    if precip is not None and precip>=20:
+                      risks.append(f"Yoğun günlük yağış ({precip:.1f} mm)"); severity="red"
+                    elif precip is not None and precip>=10:
+                      risks.append(f"Kuvvetli günlük yağış ({precip:.1f} mm)"); severity="orange" if severity!="red" else severity
+                    if peak_precip is not None and peak_precip>=10:
+                      risks.append(f"Saatlik yoğun yağış ({peak_precip:.1f} mm/sa)"); severity="red" if peak_precip>=20 else ("orange" if severity!="red" else severity)
+                    if gust is not None and gust>=70:
+                      risks.append(f"Çok kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="red"
+                    elif gust is not None and gust>=50:
+                      risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity!="red" else severity
                     if risks:
-                      if severity == "red":
-                        route_status = "red"
-                      elif severity == "orange" and route_status != "red":
-                        route_status = "orange"
-                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Riskli rota noktası {i+1}","risk":True,"severity":severity,"desc":"; ".join(risks)})
-                    report_rows.append({"Rota noktası":f"Nokta {i+1}","Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
-                      "Sıcaklık":f"{temp} °C" if temp is not None else "Veri yok","Yağış":f"{precip} mm" if precip is not None else "Veri yok",
-                      "Kar":f"{snow} cm" if snow is not None else "Veri yok","Rüzgâr hamlesi":f"{gust} km/sa" if gust is not None else "Veri yok","Risk":"; ".join(risks) if risks else ("Belirgin eşik aşımı saptanmadı" if any(v is not None for v in (temp,snow,precip,gust)) else "Bilinmiyor")})
+                      if severity == "red": route_status = "red"
+                      elif severity == "orange" and route_status not in ("red",): route_status = "orange"
+                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":"; ".join(risks)})
+                    report_rows.append({
+                      "Rota noktası":point_name,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
+                      "En düşük sıcaklık":f"{temp:.1f} °C" if temp is not None else "Veri yok",
+                      "En yüksek sıcaklık":f"{temp_max:.1f} °C" if temp_max is not None else "Veri yok",
+                      "Yağış toplamı":f"{precip:.1f} mm" if precip is not None else "Veri yok",
+                      "Saatlik en yüksek yağış":f"{peak_precip:.1f} mm/sa" if peak_precip is not None else "Veri yok",
+                      "Kar toplamı":f"{snow:.1f} cm" if snow is not None else "Veri yok",
+                      "Rüzgâr hamlesi":f"{gust:.0f} km/sa" if gust is not None else "Veri yok",
+                      "Risk":"; ".join(risks) if risks else "Belirgin eşik aşımı saptanmadı",
+                      "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi"
+                    })
 
+                  sample_markers=[{"lat":xy[0],"lon":xy[1],"name":f"Rota hava noktası {i+1}","risk":False,"desc":("Tahmin verisi alınamadı" if not wx or wx.get("_error") else "Rota boyunca meteorolojik kontrol noktası")}
+                                  for i,(xy,wx) in enumerate(zip(sample_pts,route_weather))]
                   markers=[{"lat":lat_b,"lon":lon_b,"name":"Başlangıç: "+loc_b.address,"risk":False,"desc":"Başlangıç konumu"},
-                           {"lat":lat_v,"lon":lon_v,"name":"Varış: "+loc_v.address,"risk":False,"desc":"Varış konumu"}] + risk_markers
+                           {"lat":lat_v,"lon":lon_v,"name":"Varış: "+loc_v.address,"risk":False,"desc":"Varış konumu"}] + sample_markers + risk_markers
                   st.session_state.route_map_data={"bas_ad":loc_b.address,"bit_ad":loc_v.address,
                     "lat_b":lat_b,"lon_b":lon_b,"lat_v":lat_v,"lon_v":lon_v,"markers":markers,
                     "route_geometry":route_geometry,"route_source":route_source,"report_table":report_rows,
-                    "status":route_status,"date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
+                    "status":route_status,"weather_coverage":valid_weather_count,"weather_total":len(sample_pts),
+                    "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
                     "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
                   st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
           except Exception as e:
@@ -1099,15 +1162,19 @@ if seyahat_acik:
         st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
         if r_info.get("duration_s"):
           st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen tarihin tahmin verilerinden, örnekleme amacıyla saat 12:00 civarında alınır. Uzak tarih veya eksik tahmin varsa raporda veri eksikliği belirtilir; bu bir resmî yol/AFAD/KGM uyarısı değildir.")
+      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır; kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
+      coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
+      st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
-        st.info("⚪ Güzergâh hava riski bilinmiyor: örnek rota noktalarından kullanılabilir tahmin alınamadı.")
+        st.info("⚪ Güzergâh hava riski bilinmiyor: seçilen tarih için tahmin kapsamı dışında kalan veya yanıt vermeyen rota noktaları var. Tablo hata ayrıntılarını gösterir; bu durum risksiz anlamına gelmez.")
       elif r_info.get("status") == "red":
         st.error("🔴 Güzergâhın en az bir örnek noktasında yüksek risk eşiği aşıldı.")
       elif r_info.get("status") == "orange":
         st.warning("🟠 Güzergâhın en az bir örnek noktasında dikkat gerektiren hava eşiği aşıldı.")
       elif r_info.get("status") == "partial":
         st.info("⚪ Güzergâh hava verisi kısmi: bazı örnek noktalarda tahmin alınamadı; tüm rota için risksiz sonucu çıkarılamaz.")
+      if coverage < total_points and r_info.get("status") in ("red", "orange"):
+        st.warning("⚠️ Risk sinyali tespit edildi ancak rota tahmin kapsaması kısmi. Kapsanmayan kesimler için risksiz sonucu çıkarılamaz.")
       st.dataframe(pd.DataFrame(r_info["report_table"]), use_container_width=True, hide_index=True)
 
       st.markdown("### 🗺️ Güzergâh haritası")
@@ -1122,10 +1189,16 @@ if seyahat_acik:
       else:
         folium.PolyLine(all_pts,color="#888888",weight=3,opacity=0.8,dash_array="8,8",tooltip="Şematik bağlantı; gerçek hat değildir").add_to(route_m)
       for item in r_info["markers"]:
-        color="red" if item.get("risk") else ("blue" if "Başlangıç" in item.get("name","") else "green")
+        if item.get("risk"):
+          sev=item.get("severity", "orange")
+          color="red" if sev=="red" else ("orange" if sev=="orange" else "yellow")
+          icon_name="exclamation-sign"
+        else:
+          color="blue" if "Başlangıç" in item.get("name","") else "green"
+          icon_name="play" if color=="blue" else "flag"
         popup=f"<b>{item['name']}</b><br>{item.get('desc','')}"
         folium.Marker([item["lat"],item["lon"]],popup=folium.Popup(popup,max_width=350),tooltip=item["name"],
-          icon=folium.Icon(color=color,icon="warning-sign" if item.get("risk") else "info-sign",prefix="glyphicon")).add_to(route_m)
+          icon=folium.Icon(color=color,icon=icon_name,prefix="glyphicon")).add_to(route_m)
       route_map_data=st_folium(route_m,width="100%",height=460,key="route_map_turkey_smart_v1",returned_objects=["last_clicked","zoom"])
       route_clicked=route_map_data.get("last_clicked") if route_map_data else None
       if route_clicked:
@@ -1637,11 +1710,47 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       with curr_col5: st.metric(label="Rüzgâr Yönü / Yakın Saat CAPE", value=f"{wind_cardinal} / {_fmt_metric(current_cape, ' J/kg', 0)}")
 
     st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
-    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "🇹🇷 Türkiye Hava Panoraması", "🤝 3\'lü Model Konsensüsü", "🕰️ Geçmiş Arşiv", "📄 Uzman Bülteni",
         "🌡️ Sıcaklık & Nem", "💨 Hassas Rüzgar & Hamle", "☁️ Basınç & Bulut",
-        "❄️ Yağış, Kar & Olasılık", "📋 7 Günlük Hava Özeti & İndirme",
+        "❄️ Yağış, Kar & Olasılık", "📋 7 Günlük Hava Özeti & İndirme", "🚨 Türkiye Geneli Erken Uyarı",
     ])
+
+    with tab9:
+      st.subheader("🚨 Türkiye Geneli Erken Uyarı Masası")
+      st.caption("81 il merkezi tahmini üzerinden eşik tabanlı otomatik tarama. Bu sistem MGM/AFAD resmî uyarısı değildir; yerel koşullar farklılık gösterebilir.")
+      st.caption(f"Veri zamanı: {ews_result.get('national', {}).get('updated_at', 'bilinmiyor')} · Kapsam: {len(ews_result.get('successful_centers', []))}/81 il")
+      risk_alerts = ews_result.get("alerts", [])
+      if risk_alerts:
+        # Group same city/event to reduce repetitive clutter; keep highest severity first.
+        severity_order = {"Yüksek": 0, "Orta": 1, "Düşük": 2}
+        risk_alerts = sorted(risk_alerts, key=lambda a: (severity_order.get(a.get("seviye"), 9), a.get("il", ""), a.get("tip", "")))
+        st.warning(f"{len(risk_alerts)} risk sinyali bulundu. Aşağıdaki liste il ve olay türüne göre düzenlenmiştir.")
+        with st.expander("Risk sinyallerini görüntüle", expanded=True):
+          for alert in risk_alerts[:60]:
+            try:
+              time_text = pd.to_datetime(alert.get("zaman")).strftime("%d.%m.%Y %H:%M")
+            except Exception:
+              time_text = str(alert.get("zaman", "Zaman bilinmiyor"))
+            model_support = alert.get("model_uyumu", "Model desteği bilinmiyor")
+            st.warning(f"**{alert.get('il','İl bilinmiyor')}** · {alert.get('tip','Risk')} ({_safe_number(alert.get('deger'), default=0):.1f} {alert.get('birim','')}) · {time_text} · {alert.get('seviye','Belirsiz')} · {model_support}")
+          if len(risk_alerts) > 60:
+            st.caption(f"İlk 60 kayıt gösteriliyor; toplam {len(risk_alerts)} sinyal mevcut.")
+      elif not ews_result.get("successful_centers"):
+        st.info("Türkiye geneli risk durumu bilinmiyor: veri alınan il merkezi yok.")
+      elif ews_result.get("failed_centers"):
+        st.info(f"Kısmi veri: {len(ews_result.get('successful_centers', []))} il kontrol edildi; {len(ews_result.get('failed_centers', []))} ilde veri alınamadı. Bu, ülke genelinde risk yok demek değildir.")
+      else:
+        st.success("Verisi alınan il merkezlerinde tanımlı eşikler aşılmadı. Bu, risk bulunmadığının veya resmî uyarı olmadığının garantisi değildir.")
+      st.markdown("#### Bölgelere göre risk özeti")
+      regional_data = ews_result.get("regional", {})
+      if regional_data:
+        regional_view = []
+        for region, info in regional_data.items():
+          regional_view.append({"Bölge": region, "Kontrol edilen il": f"{info.get('checked', 0)}/{info.get('expected', 0)}", "Durum": info.get("risk_status", "Bilinmiyor"), "Riskli il sayısı": info.get("alert_city_count", 0), "Yüksek sinyal": info.get("high_alerts", 0), "En düşük sıcaklık": f"{info['min_temp']:.1f} °C" if info.get("min_temp") is not None else "Veri yok", "En yüksek yağış": f"{info['max_rain']:.1f} mm" if info.get("max_rain") is not None else "Veri yok"})
+        st.dataframe(pd.DataFrame(regional_view), hide_index=True, use_container_width=True)
+      with st.expander("MGM resmî uyarılarına git"):
+        st.markdown("Resmî uyarı ve duyurular için [MGM MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx).")
 
     with tab0:
       st.subheader("🇹🇷 Türkiye Hava Panoraması · 81 İl Merkezi")
@@ -1673,12 +1782,12 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.dataframe(view,hide_index=True,use_container_width=True)
         st.markdown("#### Türkiye haritası · sıcaklık noktaları ve yoğunluk katmanı")
         map_metric=st.selectbox("Harita sıcaklık katmanı",["temperature_2m_max","temperature_2m_min"],
-          format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v14_turkey_map_metric")
+          format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v15_turkey_map_metric")
         turkey_map=build_turkey_temperature_map(national_rows,map_metric)
         if turkey_map is not None:
-          st_folium(turkey_map,width=None,height=520,key="v14_turkey_temperature_map")
+          st_folium(turkey_map,width=None,height=520,key="v15_turkey_temperature_map")
           st.caption("Renkli noktalar il merkezi tahminlerini, yoğunluk katmanı ise bunların görsel dağılımını gösterir. İlçe/dağlık mikroklima çözünürlüğü değildir.")
-        st.markdown("#### V14 · ECMWF / GFS / ICON model karşılaştırması")
+        st.markdown("#### ECMWF / GFS / ICON model karşılaştırması")
         mc=ews_result.get("model_comparison",{})
         cov=mc.get("model_coverage",{})
         if cov:
