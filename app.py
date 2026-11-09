@@ -1439,22 +1439,39 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
   return archive_df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def get_latest_radar_tile_url():
-  """Return the latest RainViewer observed radar tile template, if available."""
-  response = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=5)
+@st.cache_data(ttl=300, show_spinner=False)
+def get_rainviewer_layers():
+  """Return latest observed radar and short-range nowcast tile templates."""
+  response = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=8)
   response.raise_for_status()
   payload = response.json()
   host = payload.get("host")
-  frames = (payload.get("radar") or {}).get("past") or []
-  if not host or not frames:
-    return None
-  latest_frame = frames[-1]
-  path = latest_frame.get("path")
-  if not path:
-    return None
-  # RainViewer frame paths are API-provided; don't hardcode a frame timestamp.
-  return f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"
+  radar = payload.get("radar") or {}
+  past = radar.get("past") or []
+  nowcast = radar.get("nowcast") or []
+  result = {"observed_url": None, "observed_time": None, "forecast_url": None, "forecast_time": None}
+  if not host:
+    return result
+  if past:
+    frame = past[-1]
+    path = frame.get("path")
+    if path:
+      result["observed_url"] = f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"
+      result["observed_time"] = frame.get("time")
+  if nowcast:
+    frame = nowcast[-1]
+    path = frame.get("path")
+    if path:
+      result["forecast_url"] = f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"
+      result["forecast_time"] = frame.get("time")
+  return result
+
+
+def _format_radar_timestamp(timestamp):
+  try:
+    return pd.to_datetime(timestamp, unit="s", utc=True).tz_convert("Europe/Istanbul").strftime("%d.%m.%Y %H:%M")
+  except Exception:
+    return "zaman bilgisi yok"
 
 
 # --- 2 YÖNLÜ SENKRONİZE ARAMA FORMU ---
@@ -1494,25 +1511,45 @@ if search_button and search_query:
     st.error(f"Arama hatası: {e}")
 
 # --- KUSURSUZ İNTERAKTİF HARİTA (ÇİFT YÖNLÜ SENKRONİZASYON) ---
+st.markdown("#### Harita katmanları")
+layer_col1, layer_col2 = st.columns(2)
+with layer_col1:
+  show_observed_radar = st.checkbox("Mevcut yağış radarı", value=False, key="main_show_observed_radar")
+with layer_col2:
+  show_radar_nowcast = st.checkbox("Kısa vadeli yağış tahmini", value=False, key="main_show_radar_nowcast")
+st.caption("Harita varsayılan olarak sade açılır. İstediğin katmanı ayrıca etkinleştirebilirsin.")
+
 m = folium.Map(
     location=[st.session_state.lat, st.session_state.lon],
     zoom_start=st.session_state.zoom,
     tiles="OpenStreetMap",
+    control_scale=True,
 )
 
 Fullscreen(position="topright").add_to(m)
 LocateControl(position="topleft", strings={"title": "Konumuma Git"}).add_to(m)
 
-try:
-  radar_tiles = get_latest_radar_tile_url()
-  if radar_tiles:
-    TileLayer(tiles=radar_tiles, attr='Weather data by <a href="https://www.rainviewer.com/">RainViewer</a>',
-              name="Son Radar Gözlemi", overlay=True, opacity=0.6,
-              max_native_zoom=7, max_zoom=18).add_to(m)
-  else:
-    st.caption("Yağış radarı şu anda veri sunmuyor.")
-except Exception:
-  st.caption("Yağış radarı servisine şu anda ulaşılamıyor; ana harita kullanılabilir.")
+if show_observed_radar or show_radar_nowcast:
+  try:
+    radar_layers = get_rainviewer_layers()
+    if show_observed_radar:
+      if radar_layers.get("observed_url"):
+        TileLayer(tiles=radar_layers["observed_url"], attr='Weather data by <a href="https://www.rainviewer.com/">RainViewer</a>',
+                  name="Mevcut yağış radarı", overlay=True, opacity=0.62,
+                  max_native_zoom=7, max_zoom=18, show=True).add_to(m)
+        st.caption("Radar gözlem zamanı: " + _format_radar_timestamp(radar_layers.get("observed_time")))
+      else:
+        st.info("RainViewer şu anda kullanılabilir gözlem radarı karesi sunmuyor.")
+    if show_radar_nowcast:
+      if radar_layers.get("forecast_url"):
+        TileLayer(tiles=radar_layers["forecast_url"], attr='Forecast by <a href="https://www.rainviewer.com/">RainViewer</a>',
+                  name="Kısa vadeli yağış tahmini", overlay=True, opacity=0.58,
+                  max_native_zoom=7, max_zoom=18, show=True).add_to(m)
+        st.caption("Tahmin katmanı RainViewer nowcast ürünüdür; uzun vadeli hava tahmini değildir. Zaman: " + _format_radar_timestamp(radar_layers.get("forecast_time")))
+      else:
+        st.info("RainViewer şu anda kısa vadeli nowcast karesi sunmuyor; tahmin katmanı gösterilemedi.")
+  except Exception as radar_exc:
+    st.warning(f"Yağış katmanları şu anda alınamadı: {radar_exc}")
 
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
@@ -1774,6 +1811,19 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
     with tab0:
       st.subheader("🇹🇷 Türkiye Hava Panoraması · 81 İl Merkezi")
+      with st.expander("Bu bölüm nasıl çalışıyor?", expanded=True):
+        st.markdown("""
+        Bu ekran, Türkiye'deki **81 ilin merkez koordinatları** için hava tahminlerini toplar ve ülke genelini karşılaştırır. İlçelerin tamamını veya her ilin dağlık/kıyı mikroklimasını temsil etmez.
+
+        - **Verisi alınan il:** Kaynaktan geçerli tahmin dönen il merkezi sayısıdır; 81'e ulaşmıyorsa kapsam eksiktir.
+        - **Sıcaklık ve yağış göstergeleri:** Seçilen tahmin gününün günlük en yüksek/en düşük sıcaklık ve yağış toplamı gibi değerlerini özetler.
+        - **Bölgesel durum:** İlleri yedi coğrafi bölge altında toplar; risk sinyalleri eşik tabanlıdır, resmî MGM uyarısı değildir.
+        - **Model karşılaştırması:** ECMWF, GFS ve ICON verileri mevcutsa tahminlerin ortalamasını ve aralarındaki farkı gösterir. Modellerin ayrışması belirsizliğin arttığına işaret eder.
+        - **Harita:** Renkli noktalar il merkezlerindeki tahmin değerlerini, yoğunluk katmanı ise yalnızca bu noktaların görsel dağılımını gösterir.
+        - **Günlük özet:** Verisi bulunan iller arasındaki en yüksek sıcaklık, en düşük sıcaklık ve en yüksek yağış gibi öne çıkan değerleri otomatik metne dönüştürür.
+
+        Veriler önbellek süresi boyunca tekrar kullanılabilir; bu nedenle her sayfa yenilemesinde mutlaka yeni model çalıştırması yapılmaz. Bu bölüm genel görünüm ve karar desteğidir; resmî uyarılar için MGM/AFAD duyuruları esas alınmalıdır.
+        """)
       national = ews_result.get("national", {})
       national_rows = national.get("rows", [])
       st.caption("İl merkezleri için üç günlük tahminin ilk günü gösterilir. Veriler 15 dakika önbelleklenir; yenileme sonrası kaynak güncelse yeni tahmin alınır.")
@@ -1796,9 +1846,15 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.dataframe(pd.DataFrame(reg_rows),hide_index=True,use_container_width=True)
         st.markdown("#### İl bazında sıcaklık ve yağış")
         sort_col=st.selectbox("Sıralama",["temperature_2m_max","temperature_2m_min","precipitation_sum","wind_gusts_10m_max"],format_func=lambda x:{"temperature_2m_max":"En yüksek sıcaklık","temperature_2m_min":"En düşük sıcaklık","precipitation_sum":"Toplam yağış","wind_gusts_10m_max":"Rüzgâr hamlesi"}[x],key="national_sort")
-        view=ndf[["il",sort_col,"temperature_2m_min","temperature_2m_max","precipitation_sum","max_rain_3h_mm","max_rain_6h_mm","precipitation_probability_max","snowfall_sum","freezing_level_height_min_m","snowfall_height_min_m","wind_gusts_10m_max"]].copy()
-        view=view.sort_values(sort_col,ascending=(sort_col=="temperature_2m_min"),na_position="last")
-        view.columns=["İl","Sıralama ölçütü","Min °C","Maks °C","Yağış mm/gün","Maks 3 saat mm","Maks 6 saat mm","Yağış olasılığı %","Kar cm","En düşük donma seviyesi m","En düşük kar yağışı seviyesi m","Rüzgâr hamlesi km/sa"]
+        # Seçilen sıralama alanı min/max sıcaklık listesinde tekrar edebiliyordu.
+        # Pandas duplicate column label ile sort_values çağrısını reddeder; sütunları tekilleştir.
+        base_columns=["il","temperature_2m_min","temperature_2m_max","precipitation_sum","max_rain_3h_mm","max_rain_6h_mm","precipitation_probability_max","snowfall_sum","freezing_level_height_min_m","snowfall_height_min_m","wind_gusts_10m_max"]
+        view_columns=["il"] + ([sort_col] if sort_col in ndf.columns else []) + [c for c in base_columns if c != "il" and c != sort_col and c in ndf.columns]
+        view=ndf.loc[:, view_columns].copy()
+        if sort_col in view.columns:
+          view=view.sort_values(sort_col,ascending=(sort_col=="temperature_2m_min"),na_position="last")
+        column_labels={"il":"İl","temperature_2m_min":"Min °C","temperature_2m_max":"Maks °C","precipitation_sum":"Yağış mm/gün","max_rain_3h_mm":"Maks 3 saat mm","max_rain_6h_mm":"Maks 6 saat mm","precipitation_probability_max":"Yağış olasılığı %","snowfall_sum":"Kar cm","freezing_level_height_min_m":"En düşük donma seviyesi m","snowfall_height_min_m":"En düşük kar yağışı seviyesi m","wind_gusts_10m_max":"Rüzgâr hamlesi km/sa"}
+        view=view.rename(columns=column_labels)
         st.dataframe(view,hide_index=True,use_container_width=True)
         st.markdown("#### Türkiye haritası · sıcaklık noktaları ve yoğunluk katmanı")
         map_metric=st.selectbox("Harita sıcaklık katmanı",["temperature_2m_max","temperature_2m_min"],
