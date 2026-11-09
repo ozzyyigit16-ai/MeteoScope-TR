@@ -22,7 +22,7 @@ from geopy.distance import geodesic
 
 # Sayfa Yapılandırması
 st.set_page_config(
-    page_title="MeteoScope-TR - Global Meteoroloji & Uzman Paneli",
+    page_title="MeteoScope-TR v13 - Türkiye Geneli Meteoroloji & Uzman Paneli",
     page_icon="🌍",
     layout="wide",
 )
@@ -333,81 +333,194 @@ def konum_uyari_analizi(curr_data, df_3days):
   return uyarilar
 
 
-# --- TÜRKİYE GENELİ ERKEN UYARI MASASI (EWS) ---
-TURKEY_REGIONAL_CENTERS = {
-    "Marmara (İstanbul)": (41.0082, 28.9784),
-    "İç Anadolu (Ankara)": (39.9334, 32.8597),
-    "Ege (İzmir)": (38.4192, 27.1287),
-    "Akdeniz (Antalya)": (36.8969, 30.7133),
-    "Karadeniz (Trabzon)": (41.0015, 39.7178),
-    "Doğu Anadolu (Erzurum)": (39.9043, 41.2679),
-    "Güneydoğu Anadolu (Diyarbakır)": (37.9144, 40.2306),
+# --- TÜRKİYE GENELİ 81 İL VERİ MOTORU (V13) ---
+# İl merkezleri yaklaşık koordinatlardır; ilçe/dağlık alan mikro-iklimini temsil etmez.
+TURKEY_PROVINCES = {
+"Adana":(37.0000,35.3213),"Adıyaman":(37.7648,38.2786),"Afyonkarahisar":(38.7507,30.5567),"Ağrı":(39.7191,43.0506),
+"Aksaray":(38.3687,34.0370),"Amasya":(40.6539,35.8330),"Ankara":(39.9334,32.8597),"Antalya":(36.8969,30.7133),
+"Ardahan":(41.1105,42.7022),"Artvin":(41.1828,41.8183),"Aydın":(37.8560,27.8416),"Balıkesir":(39.6484,27.8826),
+"Bartın":(41.6344,32.3375),"Batman":(37.8812,41.1351),"Bayburt":(40.2552,40.2249),"Bilecik":(40.0567,30.0665),
+"Bingöl":(38.8847,40.4939),"Bitlis":(38.4006,42.1095),"Bolu":(40.7395,31.6082),"Burdur":(37.7203,30.2908),
+"Bursa":(40.1885,29.0610),"Çanakkale":(40.1553,26.4142),"Çankırı":(40.6013,33.6134),"Çorum":(40.5506,34.9556),
+"Denizli":(37.7765,29.0864),"Diyarbakır":(37.9144,40.2306),"Düzce":(40.8438,31.1565),"Edirne":(41.6818,26.5623),
+"Elazığ":(38.6810,39.2264),"Erzincan":(39.7500,39.5000),"Erzurum":(39.9043,41.2679),"Eskişehir":(39.7767,30.5206),
+"Gaziantep":(37.0662,37.3833),"Giresun":(40.9128,38.3895),"Gümüşhane":(40.4603,39.4814),"Hakkari":(37.5744,43.7408),
+"Hatay":(36.2021,36.1600),"Iğdır":(39.9237,44.0450),"Isparta":(37.7648,30.5566),"İstanbul":(41.0082,28.9784),
+"İzmir":(38.4192,27.1287),"Kahramanmaraş":(37.5753,36.9228),"Karabük":(41.2061,32.6204),"Karaman":(37.1759,33.2287),
+"Kars":(40.6013,43.0975),"Kastamonu":(41.3766,33.7765),"Kayseri":(38.7312,35.4787),"Kırıkkale":(39.8468,33.5153),
+"Kırklareli":(41.7333,27.2167),"Kırşehir":(39.1458,34.1639),"Kilis":(36.7184,37.1212),"Kocaeli":(40.7654,29.9408),
+"Konya":(37.8746,32.4932),"Kütahya":(39.4167,29.9833),"Malatya":(38.3552,38.3095),"Manisa":(38.6191,27.4289),
+"Mardin":(37.3212,40.7245),"Mersin":(36.8121,34.6415),"Muğla":(37.2153,28.3636),"Muş":(38.9462,41.7539),
+"Nevşehir":(38.6244,34.7239),"Niğde":(37.9698,34.6766),"Ordu":(40.9839,37.8764),"Osmaniye":(37.0742,36.2478),
+"Rize":(41.0201,40.5234),"Sakarya":(40.6940,30.4358),"Samsun":(41.2867,36.3300),"Siirt":(37.9333,41.9500),
+"Sinop":(42.0268,35.1551),"Sivas":(39.7477,37.0179),"Şanlıurfa":(37.1674,38.7955),"Şırnak":(37.5164,42.4611),
+"Tekirdağ":(40.9780,27.5110),"Tokat":(40.3167,36.5500),"Trabzon":(41.0015,39.7178),"Tunceli":(39.1079,39.5401),
+"Uşak":(38.6823,29.4082),"Van":(38.5012,43.3730),"Yalova":(40.6500,29.2667),"Yozgat":(39.8181,34.8147),"Zonguldak":(41.4564,31.7987)
 }
 
-def _safe_number(value, default=0.0):
-  try:
-    if value is None or pd.isna(value):
-      return float(default)
-    return float(value)
-  except (TypeError, ValueError):
-    return float(default)
+TURKEY_DAILY_FIELDS = ["temperature_2m_max", "temperature_2m_min", "precipitation_sum",
+                       "precipitation_probability_max", "snowfall_sum", "wind_gusts_10m_max", "weather_code"]
+TURKEY_HOURLY_FIELDS = ["precipitation", "wind_gusts_10m", "snowfall", "temperature_2m", "cape"]
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_turkey_national_forecast():
+  """81 il merkezini çoklu-konum istekleriyle toplar; kısmi başarıyı korur."""
+  names = list(TURKEY_PROVINCES)
+  rows, errors = [], []
+  def fetch_batch(batch_names, timeout=14, retry_attempts=2):
+    coords = [TURKEY_PROVINCES[n] for n in batch_names]
+    params = {
+      "latitude": ",".join(f"{x[0]:.4f}" for x in coords),
+      "longitude": ",".join(f"{x[1]:.4f}" for x in coords),
+      "daily": ",".join(TURKEY_DAILY_FIELDS),
+      "hourly": ",".join(TURKEY_HOURLY_FIELDS),
+      "forecast_days": 3, "timezone": "Europe/Istanbul",
+      "wind_speed_unit": "kmh", "precipitation_unit": "mm"
+    }
+    last_error = None
+    for attempt in range(retry_attempts):
+      try:
+        response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
+        response.raise_for_status()
+        payload = response.json()
+        break
+      except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as exc:
+        last_error = exc
+        if attempt < retry_attempts - 1: time.sleep(0.4 * (attempt + 1))
+    else:
+      raise RuntimeError(f"Open-Meteo toplu istek hatası: {last_error}")
+    if isinstance(payload, dict):
+      if payload.get("error"):
+        raise RuntimeError(payload.get("reason", "API veri hatası"))
+      payload = [payload]
+    if not isinstance(payload, list) or len(payload) != len(batch_names):
+      raise RuntimeError("Çoklu il yanıtının konum sayısı eşleşmedi")
+    result = []
+    for name, item in zip(batch_names, payload):
+      daily, hourly = item.get("daily") or {}, item.get("hourly") or {}
+      dates = daily.get("time") or []
+      if not dates:
+        continue
+      record = {"il":name, "enlem":TURKEY_PROVINCES[name][0], "boylam":TURKEY_PROVINCES[name][1],
+                "tarih":dates[0], "veri_zamani":item.get("utc_offset_seconds")}
+      for field in TURKEY_DAILY_FIELDS:
+        vals = daily.get(field) or []
+        record[field] = vals[0] if vals and vals[0] is not None else None
+      # Üç günlük toplam/tepe değerleri; her saatlik dizi aynı zaman eksenine göre taranır.
+      for field in TURKEY_HOURLY_FIELDS:
+        vals = [v for v in (hourly.get(field) or []) if v is not None]
+        record["hourly_max_"+field] = max(vals) if vals else None
+      rain = hourly.get("precipitation") or []
+      gust = hourly.get("wind_gusts_10m") or []
+      snow = hourly.get("snowfall") or []
+      temp = hourly.get("temperature_2m") or []
+      times = hourly.get("time") or []
+      event_candidates = []
+      for i, t in enumerate(times):
+        p = rain[i] if i < len(rain) else None
+        g = gust[i] if i < len(gust) else None
+        sn = snow[i] if i < len(snow) else None
+        te = temp[i] if i < len(temp) else None
+        if p is not None and p >= 8: event_candidates.append(("Kuvvetli saatlik yağış", float(p), "mm/saat", t, "Yüksek"))
+        if g is not None and g >= 70: event_candidates.append(("Çok kuvvetli rüzgâr hamlesi", float(g), "km/sa", t, "Yüksek"))
+        elif g is not None and g >= 50: event_candidates.append(("Kuvvetli rüzgâr hamlesi", float(g), "km/sa", t, "Orta"))
+        if sn is not None and sn >= 1: event_candidates.append(("Kar yağışı", float(sn), "cm/saat", t, "Orta"))
+        cape_values = hourly.get("cape") or []
+        cape_value = cape_values[i] if i < len(cape_values) else None
+        if cape_value is not None and cape_value >= 500:
+          event_candidates.append(("Yüksek atmosferik kararsızlık (CAPE)", float(cape_value), "J/kg", t, "Orta"))
+        if te is not None and te <= 0 and ((p is not None and p >= 0.5) or (sn is not None and sn > 0)):
+          event_candidates.append(("Don eşliğinde yağış / buzlanma", float(te), "°C", t, "Yüksek"))
+      # Aynı ilde aynı olay için tek en kuvvetli kayıt; farklı olaylar korunur.
+      best = {}
+      for event in event_candidates:
+        key = event[0]
+        if key not in best or event[1] > best[key][1]: best[key] = event
+      record["olaylar"] = [{"il":name,"tip":v[0],"deger":v[1],"birim":v[2],"zaman":v[3],"seviye":v[4]} for v in best.values()]
+      daily_rain = record.get("precipitation_sum")
+      if daily_rain is not None and daily_rain >= 50:
+        record["olaylar"].append({"il":name,"tip":"Yüksek günlük yağış toplamı","deger":float(daily_rain),"birim":"mm/gün","zaman":dates[0]+" 00:00","seviye":"Yüksek"})
+      low_temp = record.get("temperature_2m_min")
+      if low_temp is not None and low_temp <= -5:
+        record["olaylar"].append({"il":name,"tip":"Çok düşük sıcaklık / don","deger":float(low_temp),"birim":"°C","zaman":dates[0]+" 06:00","seviye":"Orta"})
+      result.append(record)
+    return result
+  batches = [names[i:i+9] for i in range(0, len(names), 9)]
+  with ThreadPoolExecutor(max_workers=5) as pool:
+    future_map = {pool.submit(fetch_batch, batch): batch for batch in batches}
+    for future in as_completed(future_map):
+      try:
+        rows.extend(future.result())
+      except Exception as exc:
+        batch = future_map[future]
+        # Çoklu konum isteği başarısızsa tekil konumlarla paralel kurtarma denemesi yap.
+        with ThreadPoolExecutor(max_workers=8) as fallback_pool:
+          fallback_map = {fallback_pool.submit(fetch_batch, [city], 10, 1): city for city in batch}
+          for fallback_future in as_completed(fallback_map):
+            city = fallback_map[fallback_future]
+            try: rows.extend(fallback_future.result())
+            except Exception as city_exc:
+              errors.append({"iller":[city],"hata":f"{type(city_exc).__name__}: {str(city_exc)[:180]}"})
+  rows.sort(key=lambda x:x["il"])
+  return {"rows":rows,"errors":errors,"expected":len(TURKEY_PROVINCES),
+          "updated_at":pd.Timestamp.now(tz="Europe/Istanbul").strftime("%d.%m.%Y %H:%M"),
+          "coverage":len(rows)/len(TURKEY_PROVINCES) if TURKEY_PROVINCES else 0}
+
+
+def turkey_national_alerts(national_data):
+  alerts=[]
+  for row in national_data.get("rows",[]): alerts.extend(row.get("olaylar",[]))
+  priority={"Yüksek":0,"Orta":1,"Düşük":2}
+  alerts.sort(key=lambda x:(priority.get(x.get("seviye"),3),x.get("zaman","")))
+  return alerts
+
+
+def build_turkey_share_svg(rows, report_date):
+  """Küçük ve taşınabilir SVG günlük kartı; şehir konumları il merkezi koordinatlarıdır."""
+  import html as _html
+  if not rows: return ""
+  width,height=1080,1350
+  points=[]
+  for r in rows:
+    x=120+(r["boylam"]-26.0)/(45.0-26.0)*840
+    y=280+(42.5-r["enlem"])/(42.5-35.5)*650
+    t=r.get("temperature_2m_max")
+    color="#ef4444" if t is not None and t>=30 else "#f59e0b" if t is not None and t>=20 else "#38bdf8" if t is not None and t>=8 else "#2563eb"
+    label=_html.escape(r["il"])
+    val=f'{t:.0f}°' if t is not None else "—"
+    points.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="12" fill="{color}" stroke="#fff" stroke-width="3"/><text x="{x:.1f}" y="{y+5:.1f}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff">{val}</text>')
+  precip=sorted([r for r in rows if r.get("precipitation_sum") is not None],key=lambda x:x["precipitation_sum"],reverse=True)[:3]
+  top=" · ".join(f'{_html.escape(x["il"])} {x["precipitation_sum"]:.1f} mm' for x in precip) or "Yağış verisi sınırlı"
+  return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><defs><linearGradient id="bg" x2="0" y2="1"><stop stop-color="#092b50"/><stop offset="1" stop-color="#14618a"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#bg)"/><text x="60" y="100" font-size="34" fill="#9ddcff" font-weight="700">METEOSCOPE · TÜRKİYE</text><text x="60" y="170" font-size="58" fill="#fff" font-weight="800">GÜNLÜK HAVA PANORAMASI</text><text x="60" y="220" font-size="28" fill="#d8efff">{_html.escape(report_date)} · 81 il merkezi tahmini</text><rect x="40" y="255" width="1000" height="720" rx="34" fill="#ffffff" fill-opacity=".08" stroke="#9bdcff" stroke-opacity=".35"/>{''.join(points)}<text x="60" y="1050" font-size="27" fill="#fff" font-weight="700">En yüksek yağış tahmini (ilk 3 il)</text><text x="60" y="1100" font-size="24" fill="#bfeaff">{top}</text><text x="60" y="1190" font-size="20" fill="#d7eaff">Kaynak: Open-Meteo · İl merkezi koordinatları · 3 günlük tahminin ilk günü</text><text x="60" y="1230" font-size="18" fill="#d7eaff">Yerel mikroklima ve ilçe farklılıkları bu haritada gösterilmez.</text><text x="60" y="1290" font-size="20" fill="#fff" font-weight="700">MeteoScope-TR</text></svg>"""
+
+# --- TÜRKİYE GENELİ ERKEN UYARI MASASI (EWS) ---
+TURKEY_REGIONAL_CENTERS = {
+    "Marmara": ["İstanbul","Edirne","Tekirdağ","Kırklareli","Çanakkale","Balıkesir","Bursa","Yalova","Kocaeli","Sakarya","Bilecik"],
+    "Ege": ["İzmir","Aydın","Muğla","Manisa","Denizli","Uşak","Kütahya","Afyonkarahisar"],
+    "Akdeniz": ["Antalya","Mersin","Adana","Hatay","Osmaniye","Kahramanmaraş","Isparta","Burdur"],
+    "İç Anadolu": ["Ankara","Konya","Eskişehir","Kayseri","Sivas","Yozgat","Kırşehir","Nevşehir","Niğde","Aksaray","Karaman","Kırıkkale","Çankırı"],
+    "Karadeniz": ["Bolu","Düzce","Zonguldak","Karabük","Bartın","Kastamonu","Sinop","Samsun","Amasya","Tokat","Ordu","Giresun","Trabzon","Rize","Artvin","Gümüşhane","Bayburt","Çorum"],
+    "Doğu Anadolu": ["Erzurum","Erzincan","Kars","Ardahan","Ağrı","Iğdır","Van","Hakkari","Bitlis","Muş","Bingöl","Tunceli","Elazığ","Malatya"],
+    "Güneydoğu Anadolu": ["Gaziantep","Kilis","Şanlıurfa","Diyarbakır","Mardin","Batman","Siirt","Şırnak","Adıyaman"],
+}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_turkey_wide_ews():
-  global_alerts, successful_centers, failed_centers = [], [], []
-  def check_center(name, lat, lon):
-    try:
-      params = {"latitude": lat, "longitude": lon,
-                "hourly": "precipitation,wind_gusts_10m,cape",
-                "forecast_days": 3, "timezone": "auto", "wind_speed_unit": "kmh",
-                "precipitation_unit": "mm"}
-      response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=8)
-      response.raise_for_status()
-      payload = response.json()
-      if payload.get("error"):
-        raise RuntimeError(payload.get("reason", "Open-Meteo veri hatası"))
-      hourly = payload.get("hourly") or {}
-      times = hourly.get("time", [])
-      if not times:
-        raise RuntimeError("Saatlik tahmin zaman dizisi yok")
-      usable_fields = []
-      for field in ("precipitation", "wind_gusts_10m", "cape"):
-        values = hourly.get(field) or []
-        if any(value is not None and pd.notna(value) for value in values):
-          usable_fields.append(field)
-      if not usable_fields:
-        raise RuntimeError("İstenen risk parametrelerinde kullanılabilir sayısal veri yok")
-      center_alerts = []
-      for i, t in enumerate(times):
-        for field, threshold, label in [
-            ("precipitation", 8.0, "Kuvvetli saatlik yağış eşiği"),
-            ("wind_gusts_10m", 50.0, "Kuvvetli rüzgâr hamlesi"),
-            ("cape", 350.0, "Yüksek atmosferik kararsızlık (CAPE)")]:
-          values = hourly.get(field)
-          if not values or i >= len(values) or values[i] is None:
-            continue
-          value = _safe_number(values[i], default=float("nan"))
-          if pd.notna(value) and value >= threshold:
-            unit = "mm/saat" if field == "precipitation" else ("km/sa" if field == "wind_gusts_10m" else "J/kg")
-            center_alerts.append({"bolge": name, "tip": label,
-                                  "deger": f"{value:.1f} {unit}", "zaman": t})
-      return name, center_alerts, None
-    except Exception as exc:
-      return name, [], str(exc)[:240]
-
-  with ThreadPoolExecutor(max_workers=min(7, len(TURKEY_REGIONAL_CENTERS))) as executor:
-    futures = [executor.submit(check_center, name, coords[0], coords[1])
-               for name, coords in TURKEY_REGIONAL_CENTERS.items()]
-    for future in as_completed(futures):
-      name, alerts, error = future.result()
-      if error:
-        failed_centers.append({"bolge": name, "hata": error})
-      else:
-        successful_centers.append(name)
-        global_alerts.extend(alerts)
-  global_alerts.sort(key=lambda item: item["zaman"])
-  return {"alerts": global_alerts, "successful_centers": successful_centers,
-          "failed_centers": failed_centers, "checked_centers": len(TURKEY_REGIONAL_CENTERS)}
+  national = fetch_turkey_national_forecast()
+  rows = national.get("rows", [])
+  alerts = turkey_national_alerts(national)
+  successful = [r["il"] for r in rows]
+  failed = [name for name in TURKEY_PROVINCES if name not in successful]
+  regional = {}
+  for region, cities in TURKEY_REGIONAL_CENTERS.items():
+    city_set=set(cities)
+    region_rows=[r for r in rows if r["il"] in city_set]
+    region_alerts=[a for a in alerts if a["il"] in city_set]
+    regional[region]={"checked":len(region_rows),"expected":len(cities),"alerts":region_alerts,
+                      "max_rain":max((r.get("precipitation_sum") for r in region_rows if r.get("precipitation_sum") is not None),default=None),
+                      "min_temp":min((r.get("temperature_2m_min") for r in region_rows if r.get("temperature_2m_min") is not None),default=None)}
+  return {"alerts":alerts,"successful_centers":successful,"failed_centers":[{"bolge":x,"hata":"İl verisi alınamadı"} for x in failed],
+          "checked_centers":len(TURKEY_PROVINCES),"regional":regional,"national":national}
 
 
 # --- GİZLİ YÖNETİCİ PANELİ ---
@@ -434,25 +547,27 @@ with st.sidebar:
 
 
 # --- ANA UYGULAMA ---
-st.title("🌍 Global Meteoroloji & Uzman Ar-Ge Paneli")
+st.title("🌍 MeteoScope-TR v13 · Türkiye Geneli Meteoroloji & Uzman Ar-Ge Paneli")
 
 # --- 🚨 TÜRKİYE GENELİ ERKEN UYARI MASASI ---
 ews_result = fetch_turkey_wide_ews()
 turkiye_riskler = ews_result["alerts"]
 checked_count = len(ews_result["successful_centers"])
 failed_count = len(ews_result["failed_centers"])
-st.caption(f"Model taraması: {checked_count}/{ews_result['checked_centers']} stratejik merkez yanıt verdi. Bu eşik tabanlı model taramasıdır; MGM/AFAD resmî uyarısı değildir.")
+st.caption(f"Türkiye geneli tarama: {checked_count}/{ews_result['checked_centers']} il merkezi verisi alındı. Günlük tahminler Open-Meteo modellerinden derlenir; eşik taraması resmî MGM/AFAD uyarısı değildir. Veri zamanı: {ews_result['national'].get('updated_at', 'bilinmiyor')}.")
 if turkiye_riskler:
-  st.warning("⚠️ **TÜRKİYE GENELİ MODEL TARAMASINDA EŞİK AŞIMLARI BULUNDU**")
-  for r in turkiye_riskler:
+  st.warning("⚠️ **TÜRKİYE GENELİ 81 İL TARAMASINDA METEOROLOJİK RİSK SİNYALLERİ BULUNDU**")
+  for r in turkiye_riskler[:30]:
     t_fmt = pd.to_datetime(r['zaman']).strftime('%d.%m.%Y %H:%M')
-    st.warning(f"**{r['bolge']}** · {r['tip']} ({r['deger']}) · {t_fmt}")
+    st.warning(f"**{r['il']}** · {r['tip']} ({r['deger']:.1f} {r['birim']}) · {t_fmt} · {r['seviye']} seviye")
+  if len(turkiye_riskler) > 30:
+    st.caption(f"Toplam {len(turkiye_riskler)} risk sinyali bulundu; üst bölümde ilk 30 kayıt gösteriliyor.")
 elif checked_count == 0:
   st.info("⚪ **Türkiye geneli durumu bilinmiyor:** Hiçbir stratejik merkezden veri alınamadı. Bu sonuç stabil hava anlamına gelmez.")
 elif failed_count:
   st.info(f"⚪ **Kısmi kapsama:** Yanıt veren {checked_count} merkezde eşik aşımı saptanmadı; {failed_count} merkez kontrol edilemedi. Türkiye geneli için kesin stabil sonucu verilemez.")
 else:
-  st.success("🟢 **Taranan merkezlerde belirgin eşik aşımı saptanmadı.** Bu sonuç tüm Türkiye'yi kapsamaz ve resmî uyarı yerine geçmez.")
+  st.success("🟢 **Verisi alınan il merkezlerinde tanımlı risk eşikleri aşılmadı.** Bu otomatik tarama resmî uyarı yerine geçmez; ilçe ve yerel koşullar farklılık gösterebilir.")
 
 st.markdown("Dünya haritasında arama yapın veya haritaya tıklayın. Arama kutusu ve işaretçi çift yönlü senkronize edilir; harita seçimi arama alanına yazılır.")
 
@@ -468,6 +583,10 @@ if "location_label" not in st.session_state:
   st.session_state.location_label = "İstanbul / Merkez"
 if "search_input_val" not in st.session_state:
   st.session_state.search_input_val = "İstanbul"
+if "main_search_input" not in st.session_state:
+  st.session_state["main_search_input"] = st.session_state.search_input_val
+if "_main_map_last_click" not in st.session_state:
+  st.session_state["_main_map_last_click"] = None
 
 if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
@@ -721,7 +840,7 @@ if seyahat_acik:
                     try:
                       params={"latitude":lat,"longitude":lon,"hourly":weather_vars,
                         "start_date":planlanan_tarih.isoformat(),"end_date":planlanan_tarih.isoformat(),
-                        "timezone":"auto","wind_speed_unit":"kmh","precipitation_unit":"mm"}
+                        "forecast_days":16,"timezone":"auto","wind_speed_unit":"kmh","precipitation_unit":"mm"}
                       data=requests.get("https://api.open-meteo.com/v1/forecast",params=params,timeout=12).json()
                       hourly=data.get("hourly",{}); times=hourly.get("time",[])
                       if not times: return None
@@ -847,15 +966,32 @@ os.makedirs(BACKUP_CACHE_DIR, exist_ok=True)
 
 
 def _open_meteo_get(url, params, timeout=8):
-  response = requests.get(url, params=params, timeout=timeout)
-  try:
-    payload = response.json()
-  except Exception:
-    payload = {}
-  if not response.ok or payload.get("error"):
-    reason = payload.get("reason") or payload.get("message") or response.text[:300]
-    raise RuntimeError(f"Open-Meteo HTTP {response.status_code}: {reason}")
-  return payload
+  """Open-Meteo isteği: geçici ağ/5xx hatalarında sınırlı tekrar, hatalı JSON'u reddet."""
+  last_error = None
+  for attempt in range(3):
+    try:
+      response = requests.get(url, params=params, timeout=timeout)
+      try:
+        payload = response.json()
+      except ValueError as json_exc:
+        raise RuntimeError(f"Open-Meteo geçerli JSON döndürmedi (HTTP {response.status_code}).") from json_exc
+      if not response.ok or payload.get("error"):
+        reason = payload.get("reason") or payload.get("message") or response.text[:300]
+        # Parametre/istek hatası tekrar denenerek düzelmez.
+        if response.status_code < 500 and response.status_code != 429:
+          raise RuntimeError(f"Open-Meteo HTTP {response.status_code}: {reason}")
+        last_error = RuntimeError(f"Open-Meteo HTTP {response.status_code}: {reason}")
+      else:
+        return payload
+    except (requests.Timeout, requests.ConnectionError) as exc:
+      last_error = exc
+    except RuntimeError as exc:
+      if "HTTP 429" not in str(exc) and not re.search(r"HTTP 5\d\d", str(exc)):
+        raise
+      last_error = exc
+    if attempt < 2:
+      time.sleep(0.4 * (attempt + 1))
+  raise RuntimeError(f"Open-Meteo isteği başarısız oldu: {last_error}")
 
 
 def _get_cache_filepath(latitude, longitude):
@@ -1021,6 +1157,7 @@ def get_latest_radar_tile_url():
   path = latest_frame.get("path")
   if not path:
     return None
+  # RainViewer frame paths are API-provided; don't hardcode a frame timestamp.
   return f"{host}{path}/256/{{z}}/{{x}}/{{y}}/2/1_1.png"
 
 
@@ -1031,7 +1168,6 @@ with st.form(key="global_search_form", clear_on_submit=False):
     # Arama kutusu session_state ile reaktif olarak senkronize edilir
     search_query = st.text_input(
         "🔍 Dünyanın Herhangi Bir Yerini Ara (Ülke, Şehir, Mahalle) veya Haritadan Seç",
-        value=st.session_state.search_input_val,
         key="main_search_input"
     )
   with col2:
@@ -1049,7 +1185,9 @@ if search_button and search_query:
       st.session_state.son_arama = search_query
       st.session_state.location_label = location.address
       st.session_state.search_input_val = location.address
-      # Widget key'i sonraki rerun'da, widget olusturulmadan once guncellenecek.
+      # Arama sonrası st_folium eski last_clicked değerini geri döndürebilir.
+      # İlk eski tıklamayı tüket; yeni kullanıcı tıklamalarını normal işle.
+      st.session_state["_ignore_main_map_click_once"] = True
       st.session_state["_pending_main_search_value"] = location.address
       st.session_state["_pending_main_search"] = True
       st.success(f"Bulunan Konum: {location.address}")
@@ -1095,15 +1233,23 @@ map_data = st_folium(m, width="100%", height=500, key="meteoscope_global_main_ma
 # Haritaya Tıklama Durumu: Tıklanan yerin adresi çözülür ve arama kutusuna işlenir (1-2 saniye)
 if map_data:
   clicked = map_data.get("last_clicked")
+  if not clicked and st.session_state.pop("_ignore_main_map_click_once", False):
+    # Component refreshed without an old click payload; don't ignore next real click.
+    st.session_state["_main_map_last_click"] = None
   if clicked:
     clicked_lat = float(clicked["lat"])
     clicked_lon = float(clicked["lng"])
-    if (round(clicked_lat, 5) != round(st.session_state.lat, 5)) or (round(clicked_lon, 5) != round(st.session_state.lon, 5)):
+    click_fingerprint = (round(clicked_lat, 5), round(clicked_lon, 5))
+    if st.session_state.pop("_ignore_main_map_click_once", False):
+      # Stale component click after text search: record it, don't change location.
+      st.session_state["_main_map_last_click"] = click_fingerprint
+    elif click_fingerprint != st.session_state.get("_main_map_last_click"):
+      st.session_state["_main_map_last_click"] = click_fingerprint
       st.session_state.lat = clicked_lat
       st.session_state.lon = clicked_lon
       st.session_state.zoom = map_data.get("zoom", st.session_state.zoom)
-      
-      # Ters coğrafi kodlama ile tıklanan koordinatın yer adını buluyoruz
+
+      # Reverse geocoding; coordinates are a safe fallback if Nominatim fails.
       try:
         reverse_loc = geolocator.reverse((clicked_lat, clicked_lon), timeout=2)
         if reverse_loc and reverse_loc.address:
@@ -1116,7 +1262,6 @@ if map_data:
       st.session_state.location_label = adres_str
       st.session_state.search_input_val = adres_str
       st.session_state.son_arama = adres_str
-      # Widget key'i sonraki rerun'da, widget olusturulmadan once guncellenecek.
       st.session_state["_pending_main_search_value"] = adres_str
       st.session_state["_pending_main_search"] = True
       st.rerun()
@@ -1190,7 +1335,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       df_archive = pd.DataFrame()
       archive_error = "Ana tahmin verisi alınamadığı için arşiv sorgulanmadı."
       current_data = {}
-      current_wind = current_gust = current_snow = current_cape = 0.0
+      current_wind = current_gust = current_snow = current_cape = None
       csv_data = b""
 
   if weather_error is None:
@@ -1206,10 +1351,14 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
     saatlik_tehlikeler = konum_saatlik_tehlike_taramasi(df_3days)
     
     risk_fields = [c for c in ("precipitation", "wind_gusts_10m", "cape") if c in df_3days.columns and pd.to_numeric(df_3days[c], errors="coerce").notna().any()]
-    if not saatlik_tehlikeler and not risk_fields:
-      st.info("⚪ **Saatlik risk durumu bilinmiyor:** Önümüzdeki 72 saat için gerekli meteorolojik alanlarda kullanılabilir veri yok.")
+    expected_risk_fields = ("precipitation", "wind_gusts_10m", "cape")
+    available_risk_fields = [c for c in expected_risk_fields if c in df_3days.columns and pd.to_numeric(df_3days[c], errors="coerce").notna().any()]
+    if not saatlik_tehlikeler and len(available_risk_fields) == 0:
+      st.info("⚪ **Saatlik risk durumu bilinmiyor:** Önümüzdeki 72 saat için risk parametrelerinden sayısal veri alınamadı.")
+    elif not saatlik_tehlikeler and len(available_risk_fields) < len(expected_risk_fields):
+      st.info(f"⚪ **Kısmi meteorolojik veri:** Kullanılabilir {len(available_risk_fields)}/{len(expected_risk_fields)} risk parametresi var; görünen verilerde eşik aşımı bulunmadı. Eksik alanlar nedeniyle tüm riskler dışlanamaz.")
     elif not saatlik_tehlikeler:
-      st.success("🟢 **Taranan verilerde belirgin eşik aşımı saptanmadı:** Bu, resmî uyarı olmadığı veya risk bulunmadığı anlamına gelmez.")
+      st.info("ℹ️ **Taranan verilerde belirgin eşik aşımı saptanmadı:** Bu, resmî uyarı olmadığı veya risk bulunmadığı anlamına gelmez.")
     else:
       st.warning(f"⚠️ **DİKKAT! Model verilerine göre bu konumda kritik eşikleri aşan {len(saatlik_tehlikeler)} adet tehlikeli saat dilimi tespit edildi:**")
       saatlik_tablo_verisi = []
@@ -1228,7 +1377,8 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
     for seviye, mesaj in uyarilar:
       if seviye == "kirmizi": st.error(mesaj)
       elif seviye == "sari": st.warning(mesaj)
-      else: st.success(mesaj)
+      elif seviye == "bilgi": st.info(mesaj)
+      else: st.warning(mesaj)
 
     st.markdown("### 📅 Önümüzdeki 3 Günün Günlük Kırılımlı Hava Tahmini ve Şiddet Analizi")
     if not df_3days.empty:
@@ -1284,11 +1434,78 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       with curr_col5: st.metric(label="Rüzgâr Yönü / Yakın Saat CAPE", value=f"{wind_cardinal} / {_fmt_metric(current_cape, ' J/kg', 0)}")
 
     st.markdown("### 📊 Detaylı Model Tahminleri ve Uzman Raporu")
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "🤝 3'lü Model Konsensüsü", "🕰️ Geçmiş Arşiv", "📄 Uzman Bülteni",
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "🇹🇷 Türkiye Hava Panoraması", "🤝 3\'lü Model Konsensüsü", "🕰️ Geçmiş Arşiv", "📄 Uzman Bülteni",
         "🌡️ Sıcaklık & Nem", "💨 Hassas Rüzgar & Hamle", "☁️ Basınç & Bulut",
         "❄️ Yağış, Kar & Olasılık", "📋 7 Günlük Hava Özeti & İndirme",
     ])
+
+    with tab0:
+      st.subheader("🇹🇷 Türkiye Hava Panoraması · 81 İl Merkezi")
+      national = ews_result.get("national", {})
+      national_rows = national.get("rows", [])
+      st.caption("İl merkezleri için üç günlük tahminin ilk günü gösterilir. Veriler 15 dakika önbelleklenir; yenileme sonrası kaynak güncelse yeni tahmin alınır.")
+      if national_rows:
+        ndf = pd.DataFrame(national_rows)
+        c1,c2,c3,c4=st.columns(4)
+        temps=pd.to_numeric(ndf["temperature_2m_max"],errors="coerce").dropna()
+        rains=pd.to_numeric(ndf["precipitation_sum"],errors="coerce").dropna()
+        snow_count=int((pd.to_numeric(ndf["snowfall_sum"],errors="coerce").fillna(0)>0).sum())
+        rain_count=int((pd.to_numeric(ndf["precipitation_sum"],errors="coerce").fillna(0)>=1).sum())
+        c1.metric("Verisi alınan il",f"{len(national_rows)}/81")
+        c2.metric("En yüksek gündüz sıcaklığı",f"{temps.max():.1f} °C" if not temps.empty else "Veri yok")
+        c3.metric("Yağış beklenen il",f"{rain_count}")
+        c4.metric("Kar sinyali bulunan il",f"{snow_count}")
+        st.markdown("#### Bölgesel durum")
+        reg=ews_result.get("regional",{})
+        reg_rows=[]
+        for region,info in reg.items():
+          reg_rows.append({"Bölge":region,"Verisi alınan il":f"{info['checked']}/{info['expected']}","En düşük tahmin":f"{info['min_temp']:.1f} °C" if info['min_temp'] is not None else "Veri yok","En yüksek il yağışı":f"{info['max_rain']:.1f} mm" if info['max_rain'] is not None else "Veri yok","Risk sinyali":len(info['alerts'])})
+        st.dataframe(pd.DataFrame(reg_rows),hide_index=True,use_container_width=True)
+        st.markdown("#### İl bazında sıcaklık ve yağış")
+        sort_col=st.selectbox("Sıralama",["temperature_2m_max","temperature_2m_min","precipitation_sum","wind_gusts_10m_max"],format_func=lambda x:{"temperature_2m_max":"En yüksek sıcaklık","temperature_2m_min":"En düşük sıcaklık","precipitation_sum":"Toplam yağış","wind_gusts_10m_max":"Rüzgâr hamlesi"}[x],key="national_sort")
+        view=ndf[["il",sort_col,"temperature_2m_min","temperature_2m_max","precipitation_sum","precipitation_probability_max","snowfall_sum","wind_gusts_10m_max"]].copy()
+        view=view.sort_values(sort_col,ascending=(sort_col=="temperature_2m_min"),na_position="last")
+        view.columns=["İl","Sıralama ölçütü","Min °C","Maks °C","Yağış mm","Yağış olasılığı %","Kar cm","Rüzgâr hamlesi km/sa"]
+        st.dataframe(view,hide_index=True,use_container_width=True)
+        st.markdown("#### Türkiye haritası · il merkezleri")
+        map_df=ndf.dropna(subset=["temperature_2m_max"])[["il","enlem","boylam","temperature_2m_max","precipitation_sum"]].copy()
+        if not map_df.empty:
+          map_df["boyut"]=8
+          st.map(map_df.rename(columns={"enlem":"lat","boylam":"lon"})[["lat","lon"]],zoom=5)
+          st.caption("Harita noktaları il merkezlerini temsil eder; renkli sıcaklık katmanı yerine ayrıntılı sayısal tablo yukarıdadır.")
+        st.markdown("#### Günün Türkiye özeti")
+        hottest=ndf.loc[pd.to_numeric(ndf["temperature_2m_max"],errors="coerce").idxmax()] if temps.size else None
+        coldest=ndf.loc[pd.to_numeric(ndf["temperature_2m_min"],errors="coerce").idxmin()] if pd.to_numeric(ndf["temperature_2m_min"],errors="coerce").notna().any() else None
+        wettest=ndf.loc[pd.to_numeric(ndf["precipitation_sum"],errors="coerce").idxmax()] if rains.size else None
+        bullets=[]
+        if hottest is not None: bullets.append(f"En yüksek gündüz sıcaklığı {hottest['il']} çevresinde {hottest['temperature_2m_max']:.1f} °C.")
+        if coldest is not None: bullets.append(f"En düşük gece/sabah sıcaklığı {coldest['il']} çevresinde {coldest['temperature_2m_min']:.1f} °C.")
+        if wettest is not None: bullets.append(f"En yüksek günlük yağış toplamı {wettest['il']} için {wettest['precipitation_sum']:.1f} mm.")
+        bullets.append(f"{rain_count} il merkezinde en az 1 mm yağış; {snow_count} il merkezinde kar sinyali bulunuyor.")
+        st.info(" ".join(bullets))
+        st.markdown("#### 🏛️ MGM resmî Türkiye uyarıları")
+        mgm_national_warning = fetch_mgm_official_warnings()
+        if mgm_national_warning.get("status") == "active":
+          st.warning(mgm_national_warning.get("text", "MGM uyarısı yayımlandı."))
+        elif mgm_national_warning.get("status") == "none":
+          st.success(mgm_national_warning.get("text", "MGM günlük raporunda uyarı bulunmadığı belirtiliyor."))
+        else:
+          st.info("MGM resmî uyarı metni şu anda alınamadı; uyarı var/yok şeklinde çıkarım yapılmadı. [MGM MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx)")
+        national_alerts=turkey_national_alerts(national)
+        st.markdown("#### 81 il erken uyarı taraması")
+        if national_alerts:
+          for a in national_alerts[:30]: st.warning(f"**{a['il']} · {a['tip']}** — {a['deger']:.1f} {a['birim']} · {pd.to_datetime(a['zaman']).strftime('%d.%m %H:%M')} · {a['seviye']} seviye")
+          if len(national_alerts)>30: st.caption(f"İlk 30 kayıt gösteriliyor; toplam {len(national_alerts)} risk sinyali bulundu.")
+        else: st.success("Mevcut verisi alınan il merkezlerinde tanımlı erken uyarı eşikleri aşılmadı. Bu, risk bulunmadığının veya resmî uyarı olmadığının garantisi değildir.")
+        svg=build_turkey_share_svg(national_rows,pd.Timestamp.now(tz="Europe/Istanbul").strftime("%d.%m.%Y"))
+        st.download_button("📥 Günlük Türkiye hava görselini indir (SVG)",data=svg,file_name="meteoscope_turkiye_gunluk_hava.svg",mime="image/svg+xml",disabled=not bool(svg))
+        st.caption(f"Son başarılı veri derleme: {national.get('updated_at','bilinmiyor')} · Kapsama: %{national.get('coverage',0)*100:.0f} · Kaynak: Open-Meteo. Harita/özet il merkezlerine dayalı otomatik model derlemesidir; MGM resmî uyarılarının yerine geçmez.")
+        if national.get("errors"):
+          with st.expander(f"Veri alınamayan il grupları ({len(national['errors'])})"):
+            for err in national['errors']: st.write(f"{', '.join(err['iller'])}: {err['hata']}")
+      else:
+        st.error("Türkiye geneli tahmin verileri şu anda alınamadı. Önceki/eksik veriyle ülke geneli sonucu üretilmedi.")
 
     with tab1:
       st.subheader("🌐 Küresel Modeller Arası Karşılaştırma")
@@ -1334,7 +1551,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.info("Arşiv verisi bulunamadı. " + (archive_error or "API bu tarih aralığı için boş yanıt verdi."))
 
     with tab3:
-      st.subheader("📄 Meteorolojik Bülten ve Uzman Yaklaşımıyla Öneriler")
+      st.subheader("📄 Meteorolojik Bülten ve Uzman Kurallarına Dayalı Hazırlık Önerileri")
       rep_temp = pd.to_numeric(df_3days["temperature_2m"], errors="coerce").dropna() if "temperature_2m" in df_3days.columns else pd.Series(dtype=float)
       rep_min = float(rep_temp.min()) if not rep_temp.empty else None
       rep_max = float(rep_temp.max()) if not rep_temp.empty else None
@@ -1380,7 +1597,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
       st.markdown("---")
       st.markdown(giyim_tavsiyesi)
-      st.caption("Öneriler, seçili konumun üç günlük tahminindeki sıcaklık, hissedilen sıcaklık, yağış, yağış olasılığı, kar ve rüzgâr verileri kullanılarak hazırlanır. Tedbir yaklaşımı için MGM'nin resmî meteorolojik uyarı ve sınıflandırmaları esas alınır.")
+      st.caption("Öneriler, seçili konumun tahmin verilerinden otomatik eşik/kurallar ile oluşturulur; kişiye özel meteoroloji uzmanı değerlendirmesi değildir. Resmî uyarı ve tedbirlerde MGM duyurularını esas alın.")
       st.markdown("[MGM meteorolojik hadiseler ve MeteoUYARI açıklamaları](https://www.mgm.gov.tr/Meteouyari/meteouyari-nedir.aspx) · [MGM meteorolojik şiddet sınıflandırması](https://www.mgm.gov.tr/site/yardim1.aspx?=HadSid)")
 
       current_temp_text = f"{current_data['temperature_2m']:.1f} °C" if current_data.get("temperature_2m") is not None else "Veri yok"
@@ -1389,7 +1606,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       rep_precip_text = f"{rep_precip:.1f} mm" if rep_precip is not None else "Veri yok"
       official_text = official_warning.get("text", "Resmî uyarı alınamadı.")
       report_text = (
-          "METEOROLOJİK BÜLTEN VE HAZIRLIK ÖNERİLERİ\n"
+          "METEOROLOJİK BÜLTEN VE OTOMATİK HAZIRLIK ÖNERİLERİ\n"
           f"Konum: {selected_location}\nKoordinatlar: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}\n"
           f"Tahmin zamanı: {local_time_text}\nAnlık sıcaklık: {current_temp_text}\n"
           f"Best Match 3 günlük sıcaklık aralığı: {rep_temp_text}\n"
