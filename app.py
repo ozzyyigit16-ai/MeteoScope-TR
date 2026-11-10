@@ -240,58 +240,88 @@ def giyim_onerisi_olustur(ortalama_sicaklik, toplam_yagis, toplam_kar, max_ruzga
 
 
 def gunluk_net_giyim_tavsiyesi(day_df, day_label):
-  """Tek bir günün saatlik tahminlerinden kısa, anlaşılır kıyafet önerisi üretir."""
+  """Saatlik sıcaklık, hissedilen sıcaklık, yağış, kar ve rüzgârı birlikte yorumlar."""
   if day_df is None or day_df.empty or "temperature_2m" not in day_df.columns:
-    return f"**{day_label}:** Yeterli sıcaklık tahmini alınamadığı için güvenilir giyim önerisi oluşturulamadı."
+    return f"**{day_label}:** Yeterli tahmin verisi alınamadığı için güvenilir giyim tavsiyesi oluşturulamadı."
+
   def vals(column):
     if column not in day_df.columns:
       return pd.Series(dtype=float)
     return pd.to_numeric(day_df[column], errors="coerce").dropna()
+
   temps = vals("temperature_2m")
   if temps.empty:
-    return f"**{day_label}:** Sıcaklık verisi eksik; kıyafet önerisi oluşturulamadı."
-  tmin, tmax = float(temps.min()), float(temps.max())
+    return f"**{day_label}:** Sıcaklık verisi eksik; güvenilir giyim tavsiyesi oluşturulamadı."
+
   feels = vals("apparent_temperature")
-  ref_min = min(tmin, float(feels.min())) if not feels.empty else tmin
-  precip = vals("precipitation")
-  prob = vals("precipitation_probability")
+  tmin, tmax = float(temps.min()), float(temps.max())
+  feels_min = float(feels.min()) if not feels.empty else tmin
+  feels_max = float(feels.max()) if not feels.empty else tmax
+  effective_min, effective_max = min(tmin, feels_min), max(tmax, feels_max)
+
+  rain = vals("precipitation")
+  rain_prob = vals("precipitation_probability")
   snow = vals("snowfall")
   gust = vals("wind_gusts_10m")
   wind = vals("wind_speed_10m")
-  max_gust = float(gust.max()) if not gust.empty else (float(wind.max()) if not wind.empty else 0.0)
-  rain_mm = float(precip.sum()) if not precip.empty else 0.0
-  rain_prob = float(prob.max()) if not prob.empty else 0.0
-  snow_cm = float(snow.sum()) if not snow.empty else 0.0
+  humidity = vals("relative_humidity_2m")
 
-  if ref_min <= 0:
-    outfit = "kalın, ısı yalıtımlı mont; bere ve eldiven"
-  elif ref_min < 7:
-    outfit = "kalın mont veya sıcak tutan kaban"
-  elif ref_min < 13:
-    outfit = "orta kalınlıkta mont ve uzun kollu katman"
-  elif tmax < 20:
-    outfit = "ince ceket veya hırka üzerine mevsimlik kıyafet"
-  elif tmax < 27:
-    outfit = "hafif, nefes alabilen kıyafet; sabah-akşam için ince bir katman"
+  rain_mm = float(rain.sum()) if not rain.empty else 0.0
+  rain_probability = float(rain_prob.max()) if not rain_prob.empty else None
+  snow_total = float(snow.sum()) if not snow.empty else 0.0
+  max_gust = float(gust.max()) if not gust.empty else (float(wind.max()) if not wind.empty else 0.0)
+  max_wind = float(wind.max()) if not wind.empty else 0.0
+  max_humidity = float(humidity.max()) if not humidity.empty else None
+
+  if effective_min <= 0:
+    base = "kalın, ısı yalıtımlı kışlık mont"
+  elif effective_min < 6:
+    base = "kalın mont veya sıcak tutan kaban"
+  elif effective_min < 11:
+    base = "orta-kalın mont ve uzun kollu katman"
+  elif effective_max < 18:
+    base = "mevsimlik ceket veya hırka"
+  elif effective_max < 25:
+    base = "hafif ve nefes alabilen kıyafet"
   else:
-    outfit = "ince, açık renkli ve nefes alabilen kıyafet"
+    base = "ince, açık renkli ve nefes alabilen kıyafet"
 
   extras = []
-  if rain_mm >= 1 or rain_prob >= 50:
-    extras.append("suya dayanıklı yağmurluk ve kapalı ayakkabı al")
-  if snow_cm >= 0.2:
-    extras.append("su geçirmez, tabanı kaymaz bot giy")
+  if effective_min <= 3:
+    extras.append("bere ve eldiven")
+  if effective_max >= 29:
+    extras.append("şapka ve güneşten korunma")
+  if effective_max - effective_min >= 8:
+    extras.append("sabah-akşam serinliği için çıkarılabilir ek katman")
+  if snow_total >= 0.2:
+    extras.append("su geçirmez, tabanı kaymaz bot")
+  elif rain_mm >= 1.0 or (rain_probability is not None and rain_probability >= 50):
+    extras.append("suya dayanıklı yağmurluk ve kapalı ayakkabı")
   if max_gust >= 50:
-    extras.append("rüzgârı kesen kapüşonlu dış katman kullan; şemsiye tercih etme")
-  elif max_gust >= 30:
-    extras.append("rüzgârlık bulundur")
-  if tmax - tmin >= 9:
-    extras.append("sabah ve akşam serinliği için ek katman taşı")
-  sentence = f"**{day_label}: {outfit.capitalize()} tercih et.** Beklenen sıcaklık {tmin:.0f}–{tmax:.0f} °C."
+    extras.append("rüzgârı kesen kapüşonlu dış katman; şemsiye yerine yağmurluk")
+  elif max_gust >= 30 or max_wind >= 25:
+    extras.append("rüzgârlık veya rüzgârı kesen ince dış katman")
+  if max_humidity is not None and max_humidity >= 85 and effective_max >= 22:
+    extras.append("terletmeyen, nefes alabilen kumaş")
+
+  details = [f"sıcaklık {tmin:.0f}–{tmax:.0f} °C"]
+  if not feels.empty:
+    details.append(f"hissedilen {feels_min:.0f}–{feels_max:.0f} °C")
+  if rain_mm > 0:
+    details.append(f"yağış {rain_mm:.1f} mm")
+  if rain_probability is not None:
+    details.append(f"yağış olasılığı en fazla %{rain_probability:.0f}")
+  if snow_total > 0:
+    details.append(f"kar {snow_total:.1f} cm")
+  if max_gust > 0:
+    details.append(f"rüzgâr hamlesi {max_gust:.0f} km/sa")
+
+  sentence = f"**{day_label}: {base.capitalize()} tercih edin.**"
   if extras:
-    sentence += " Ayrıca " + "; ".join(extras) + "."
+    sentence += " " + "; ".join(dict.fromkeys(extras)).capitalize() + "."
   else:
-    sentence += " Belirgin yağış veya kuvvetli rüzgâr sinyali öne çıkmıyor."
+    sentence += " Belirgin yağış, kar veya kuvvetli rüzgâr için ek ekipman sinyali yok."
+  sentence += " (" + "; ".join(details) + ".)"
   return sentence
 
 
@@ -547,31 +577,83 @@ def _temperature_color(value):
 
 
 def build_turkey_temperature_map(rows, metric="temperature_2m_max"):
-  """Türkiye taban haritası üzerinde il merkezi sıcaklık noktaları ve yoğunluk katmanı."""
+  """Anahtarsız OpenStreetMap tabanında Türkiye'ye odaklı il merkezi sıcaklık haritası."""
   if not rows:
     return None
-  m = folium.Map(location=[39.0, 35.0], zoom_start=5, tiles="CartoDB positron", control_scale=True)
-  fg = folium.FeatureGroup(name="İl merkezi sıcaklıkları", show=True)
+  m = folium.Map(
+      location=[39.0, 35.0],
+      zoom_start=5,
+      tiles="OpenStreetMap",
+      control_scale=True,
+      prefer_canvas=True,
+      min_zoom=4,
+      max_zoom=11,
+  )
+  turkey_bounds = [[35.7, 25.5], [42.2, 44.9]]
+  m.fit_bounds(turkey_bounds)
+
+  points = folium.FeatureGroup(name="İl merkezi sıcaklıkları", show=True)
   heat = []
   for row in rows:
     value = row.get(metric)
     lat, lon = row.get("enlem"), row.get("boylam")
-    if lat is None or lon is None:
+    try:
+      lat, lon = float(lat), float(lon)
+      if not (math.isfinite(lat) and math.isfinite(lon)):
+        continue
+    except (TypeError, ValueError):
       continue
     color = _temperature_color(value)
-    popup = f"<b>{html_lib.escape(str(row.get('il','')))}</b><br>{metric}: {value if value is not None else 'Veri yok'} °C<br>Yağış: {row.get('precipitation_sum','—')} mm"
-    folium.CircleMarker(location=[lat,lon], radius=7, color=color, weight=1.5,
-      fill=True, fill_color=color, fill_opacity=.9,
-      tooltip=f"{row.get('il')}: {value if value is not None else '—'} °C",
-      popup=folium.Popup(popup, max_width=260)).add_to(fg)
-    if value is not None:
-      heat.append([lat, lon, max(0.05, min(1.0, (float(value)+20.0)/60.0))])
-  fg.add_to(m)
+    city = html_lib.escape(str(row.get("il", "")))
+    temp_text = f"{float(value):.1f} °C" if value is not None and pd.notna(value) else "Veri yok"
+    rain = row.get("precipitation_sum")
+    rain_text = f"{float(rain):.1f} mm" if rain is not None and pd.notna(rain) else "Veri yok"
+    popup_html = (
+      f"<div style='min-width:180px'><b>{city}</b><hr>"
+      f"<b>Gösterilen sıcaklık:</b> {temp_text}<br>"
+      f"<b>Günlük yağış:</b> {rain_text}<br>"
+      f"<b>Min / maks:</b> {row.get('temperature_2m_min', '—')} / "
+      f"{row.get('temperature_2m_max', '—')} °C<br>"
+      f"<b>Kar:</b> {row.get('snowfall_sum', '—')} cm<br>"
+      f"<b>Rüzgâr hamlesi:</b> {row.get('wind_gusts_10m_max', '—')} km/sa</div>"
+    )
+    folium.CircleMarker(
+      location=[lat, lon], radius=7, color="#ffffff", weight=1.5,
+      fill=True, fill_color=color, fill_opacity=0.95,
+      tooltip=f"{city}: {temp_text}",
+      popup=folium.Popup(popup_html, max_width=290),
+    ).add_to(points)
+    try:
+      numeric_value = float(value)
+      if math.isfinite(numeric_value):
+        heat.append([lat, lon, max(0.05, min(1.0, (numeric_value + 20.0) / 60.0))])
+    except (TypeError, ValueError):
+      pass
+
+  points.add_to(m)
   if heat:
-    HeatMap(heat, name="Sıcaklık yoğunluk görünümü", radius=28, blur=22, min_opacity=.25).add_to(m)
-  folium.LayerControl(collapsed=False).add_to(m)
+    heat_layer = folium.FeatureGroup(name="Sıcaklık yoğunluk görünümü", show=False)
+    HeatMap(heat, radius=25, blur=18, min_opacity=0.22).add_to(heat_layer)
+    heat_layer.add_to(m)
+
+  legend = """
+  <div style="position:fixed;left:58px;bottom:28px;z-index:9999;background:rgba(255,255,255,.96);
+       padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;
+       box-shadow:0 1px 5px rgba(0,0,0,.16);font-size:12px;line-height:1.65">
+    <b>Sıcaklık (°C)</b><br>
+    <span style="color:#1d4ed8">●</span> ≤ -5&nbsp;
+    <span style="color:#38bdf8">●</span> 0&nbsp;
+    <span style="color:#14b8a6">●</span> 1–10<br>
+    <span style="color:#84cc16">●</span> 11–20&nbsp;
+    <span style="color:#f59e0b">●</span> 21–30&nbsp;
+    <span style="color:#ef4444">●</span> &gt;30
+  </div>
+  """
+  m.get_root().html.add_child(folium.Element(legend))
+  folium.LayerControl(collapsed=True).add_to(m)
   folium.plugins.Fullscreen().add_to(m)
   return m
+
 
 TURKEY_DAILY_FIELDS = ["temperature_2m_max", "temperature_2m_min", "precipitation_sum",
                        "precipitation_probability_max", "snowfall_sum", "wind_gusts_10m_max", "weather_code"]
@@ -1919,13 +2001,13 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         column_labels={"il":"İl","temperature_2m_min":"Min °C","temperature_2m_max":"Maks °C","precipitation_sum":"Yağış mm/gün","max_rain_3h_mm":"Maks 3 saat mm","max_rain_6h_mm":"Maks 6 saat mm","precipitation_probability_max":"Yağış olasılığı %","snowfall_sum":"Kar cm","freezing_level_height_min_m":"En düşük donma seviyesi m","snowfall_height_min_m":"En düşük kar yağışı seviyesi m","wind_gusts_10m_max":"Rüzgâr hamlesi km/sa"}
         view=view.rename(columns=column_labels)
         st.dataframe(view,hide_index=True,use_container_width=True)
-        st.markdown("#### Türkiye haritası · sıcaklık noktaları ve yoğunluk katmanı")
-        map_metric=st.selectbox("Harita sıcaklık katmanı",["temperature_2m_max","temperature_2m_min"],
-          format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v15_turkey_map_metric")
+        st.markdown("#### Türkiye haritası · il bazında sıcaklık ve hava verileri")
+        map_metric=st.selectbox("Haritada gösterilecek sıcaklık",["temperature_2m_max","temperature_2m_min"],
+          format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v20_turkey_map_metric")
         turkey_map=build_turkey_temperature_map(national_rows,map_metric)
         if turkey_map is not None:
-          st_folium(turkey_map,width=None,height=520,key="v15_turkey_temperature_map")
-          st.caption("Renkli noktalar il merkezi tahminlerini, yoğunluk katmanı ise bunların görsel dağılımını gösterir. İlçe/dağlık mikroklima çözünürlüğü değildir.")
+          st_folium(turkey_map,width=None,height=650,key="v20_turkey_temperature_map")
+          st.caption("Harita Türkiye'ye odaklanır. Renkli il noktasına tıklayarak sıcaklık, yağış, kar ve rüzgâr ayrıntılarını görebilirsin. Yoğunluk katmanı haritanın katman menüsünden isteğe bağlı açılır. Veriler il merkezlerini temsil eder.")
         st.markdown("#### ECMWF / GFS / ICON model karşılaştırması")
         mc=ews_result.get("model_comparison",{})
         cov=mc.get("model_coverage",{})
@@ -2086,7 +2168,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
       st.markdown("---")
       st.markdown(giyim_tavsiyesi)
-      st.caption("Giyim tavsiyeleri seçili konumun bugüne ve yarına ait saatlik sıcaklık, hissedilen sıcaklık, yağış, kar ve rüzgâr tahminlerinden otomatik oluşturulur. Veri eksikse kesin öneri uydurulmaz.")
+      st.caption("Giyim tavsiyesi bugünün ve yarının saatlik sıcaklık, hissedilen sıcaklık, yağış miktarı ve olasılığı, kar, rüzgâr hızı/hamlesi ve mevcutsa nem verileri birlikte değerlendirilerek hazırlanır. Eksik veriden kesin sonuç çıkarılmaz.")
       st.markdown("[MGM meteorolojik hadiseler ve MeteoUYARI açıklamaları](https://www.mgm.gov.tr/Meteouyari/meteouyari-nedir.aspx) · [MGM meteorolojik şiddet sınıflandırması](https://www.mgm.gov.tr/site/yardim1.aspx?=HadSid)")
 
       current_temp_text = f"{current_data['temperature_2m']:.1f} °C" if current_data.get("temperature_2m") is not None else "Veri yok"
