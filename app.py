@@ -1122,6 +1122,29 @@ def geocode_route_location(query):
         "address": str(location.address),
     }
 
+
+route_reverse_limiter = RateLimiter(
+    geolocator.reverse,
+    min_delay_seconds=1.1,
+    max_retries=0,
+    error_wait_seconds=1.0,
+    swallow_exceptions=True,
+)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def reverse_route_risk_address(lat, lon):
+    """Resolve a risk coordinate to a readable Turkish address; cache for 24h."""
+    try:
+        place = route_reverse_limiter(
+            (float(lat), float(lon)), exactly_one=True,
+            language="tr", addressdetails=True, timeout=8
+        )
+        if place and place.address:
+            return str(place.address)
+    except Exception:
+        pass
+    return f"Açık adres alınamadı (koordinat: {float(lat):.5f}, {float(lon):.5f})"
+
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
 if "lon" not in st.session_state:
@@ -1262,6 +1285,11 @@ def _tr_place_tokens(loc):
 
 def _tr_mode_availability(mode, loc_b, loc_v, dist_km):
     a, b = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
+    # Karayolunda şehir takma-adı listesi sınırlayıcı olmamalı: Türkiye'deki
+    # tüm iller ve geocode edilebilen ilçe/mahalleler OSRM koordinatlarıyla
+    # doğrulanır. Böylece 81 ilin tamamı kullanılabilir.
+    if mode in ("Özel araç", "Otobüs"):
+        return True, "Karayolu bağlantısı OSRM yol ağı üzerinden kontrol edilecek."
     if not a or not b:
         return None, "Konumlar Türkiye içinde çözümlendi ancak şehir/hat eşleşmesi yapılamadı. Ulaşım uygunluğu kesin doğrulanamadı."
     if mode == "Uçak":
@@ -1373,8 +1401,14 @@ if seyahat_acik:
                     else:
                       raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
                   except Exception as route_err:
-                    show_service_issue("Gerçek karayolu rotası alınamadı; düz çizgiyle rota varmış gibi gösterilmeyecek.", route_err)
-                    st.session_state.route_map_data=None
+                    # Yol ağı servisi geçici olarak yanıt vermese de analiz akışını
+                    # tamamen düşürme. Şematik bağlantıyı açıkça etiketle; gerçek
+                    # yol geometrisi veya yol üstü adresiymiş gibi sunma.
+                    show_service_issue("Gerçek yol geometrisi şu anda alınamadı. Güzergâhın şematik bağlantısı ve mevcut hava verileri gösterilecek.", route_err)
+                    route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
+                    route_source="Şematik bağlantı (OSRM yol ağı geçici olarak alınamadı; gerçek yol geometrisi değildir)"
+                    route_distance_m=None
+                    route_duration_s=None
                 else:
                   # Non-road modes: show only a clearly labelled schematic connection.
                   route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
@@ -1536,12 +1570,14 @@ if seyahat_acik:
                       risks.append(f"Çok kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="red"
                     elif gust is not None and gust>=50:
                       risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity!="red" else severity
+                    risk_address = "Risk eşiği aşılmadı"
                     if risks:
                       if severity == "red": route_status = "red"
                       elif severity == "orange" and route_status not in ("red",): route_status = "orange"
-                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":"; ".join(risks)})
+                      risk_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":f"{risk_address} · " + "; ".join(risks)})
                     report_rows.append({
-                      "Rota noktası":point_name,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
+                      "Rota noktası":point_name,"Riskli konumun açık adresi":risk_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
                       "En düşük sıcaklık":f"{temp:.1f} °C" if temp is not None else "Veri yok",
                       "En yüksek sıcaklık":f"{temp_max:.1f} °C" if temp_max is not None else "Veri yok",
                       "Yağış toplamı":f"{precip:.1f} mm" if precip is not None else "Veri yok",
@@ -1574,7 +1610,7 @@ if seyahat_acik:
         st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
         if r_info.get("duration_s"):
           st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
+      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Riskli koordinatlar için harita adres servisi üzerinden en yakın açık adres çözülür; bu adres yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
       coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
       st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
