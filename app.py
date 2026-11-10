@@ -1077,10 +1077,36 @@ geolocator = Nominatim(user_agent="MeteoScope-TR/1.0", timeout=10)
 route_geocode_limiter = RateLimiter(
     geolocator.geocode,
     min_delay_seconds=1.2,
-    max_retries=2,
-    error_wait_seconds=2.5,
+    # Nominatim rate-limit errors are surfaced immediately to the UI; repeated
+    # automatic retries can leave the route spinner running for a long time.
+    max_retries=0,
+    error_wait_seconds=1.5,
     swallow_exceptions=False,
 )
+
+
+def _route_request_get(url, *args, **kwargs):
+    """Route-only HTTP policy: bounded wait, no retry storm on HTTP 429."""
+    service = str(url).split('/')[2] if '://' in str(url) else 'rota servisi'
+    last_exc = None
+    for attempt in range(2):
+        try:
+            response = requests.get(url, *args, **kwargs)
+            if response.status_code == 429:
+                raise TemporaryServiceError(service, 'HTTP 429 - yoğun istek sınırı', 429)
+            if response.status_code in (500, 502, 503, 504) and attempt == 0:
+                time.sleep(0.7)
+                continue
+            return response
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.7)
+                continue
+            raise TemporaryServiceError(service, type(exc).__name__) from exc
+    if last_exc:
+        raise TemporaryServiceError(service, str(last_exc)) from last_exc
+    return response
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1290,7 +1316,7 @@ if seyahat_acik:
       elif _tr_norm(baslangic_yer) == _tr_norm(bitis_yer):
         st.warning("Başlangıç ve varış aynı görünüyor. Farklı konumlar gir.")
       else:
-        with st.spinner("Türkiye içindeki konumlar, ulaşım bağlantıları ve rota ağı kontrol ediliyor..."):
+        with st.spinner("Güzergâh hazırlanıyor: konumlar doğrulanıyor, yol ağı ve hava tahminleri kontrol ediliyor. Servis yanıt vermezse açıklayıcı uyarı gösterilecek..."):
           try:
             # Same place queries are served from cache; new Nominatim requests are
             # serialized/rate-limited to avoid public-service HTTP 429 responses.
@@ -1332,22 +1358,12 @@ if seyahat_acik:
                   try:
                     osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
                       f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
-                    osrm_resp = None
-                    for osrm_attempt in range(3):
-                      osrm_resp = _request_get(
-                        osrm_url,
-                        params={"overview":"full", "geometries":"geojson", "steps":"false"},
-                        timeout=15,
-                        headers={"User-Agent": "MeteoScope-TR/1.0"},
-                      )
-                      if osrm_resp.status_code != 429 or osrm_attempt == 2:
-                        break
-                      retry_after = osrm_resp.headers.get("Retry-After", "2")
-                      try:
-                        wait_seconds = max(1.0, min(float(retry_after), 8.0))
-                      except (TypeError, ValueError):
-                        wait_seconds = 2.0 * (osrm_attempt + 1)
-                      time.sleep(wait_seconds)
+                    osrm_resp = _route_request_get(
+                      osrm_url,
+                      params={"overview":"full", "geometries":"geojson", "steps":"false"},
+                      timeout=15,
+                      headers={"User-Agent": "MeteoScope-TR/1.0"},
+                    )
                     osrm_resp.raise_for_status(); osrm_json=osrm_resp.json()
                     if osrm_json.get("code") == "Ok" and osrm_json.get("routes"):
                       rr=osrm_json["routes"][0]
@@ -1441,7 +1457,7 @@ if seyahat_acik:
                     }
                     batch_error = None
                     try:
-                      resp = _request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=30)
+                      resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
                       resp.raise_for_status()
                       payload = resp.json()
                       if isinstance(payload, list) and len(payload) == len(points):
@@ -1454,10 +1470,17 @@ if seyahat_acik:
                         batch_error = "Toplu hava yanıtı rota noktalarıyla eşleşmedi"
                     except Exception as exc:
                       batch_error = f"Toplu sorgu başarısız: {exc}"
-                      if _is_temporary_service_problem(exc) and ('429' in str(exc) or 'rate limit' in str(exc).lower()):
-                        return [{"_error": "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."} for _ in points]
+                      if _is_temporary_service_problem(exc):
+                        # Do not amplify a temporary outage/rate limit with up to
+                        # 15 parallel fallback calls. Report unavailable data clearly.
+                        if '429' in str(exc).lower() or 'rate limit' in str(exc).lower():
+                          reason = "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."
+                        else:
+                          reason = "Hava servisine geçici olarak ulaşılamadı; rota noktaları için toplu tahmin alınamadı."
+                        return [{"_error": reason} for _ in points]
 
-                    # A single batch failure must not make every route segment unknown.
+                    # Only a non-temporary response/schema mismatch reaches fallback.
+                    # Keep it sequential and bounded to avoid overloading the API.
                     def get_one(xy):
                       try:
                         one_params = {
@@ -1467,14 +1490,20 @@ if seyahat_acik:
                           "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
                           "precipitation_unit": "mm"
                         }
-                        one_resp = _request_get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=25)
+                        one_resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=12)
                         one_resp.raise_for_status()
                         return parse_date_weather(one_resp.json(), target_date)
                       except Exception as exc:
                         return {"_error": f"{exc} (toplu sorgu: {batch_error})"}
 
-                    with ThreadPoolExecutor(max_workers=min(5, len(points))) as fallback_pool:
-                      return list(fallback_pool.map(get_one, points))
+                    fallback_results = []
+                    for xy in points[:5]:
+                      fallback_results.append(get_one(xy))
+                    fallback_results.extend(
+                      [{"_error": "Toplu yanıt biçimi uyuşmadı; ek sorgu güvenli istek sınırı nedeniyle yapılmadı."}
+                       for _ in points[len(fallback_results):]]
+                    )
+                    return fallback_results
 
                   route_weather = get_date_weather_batch(sample_pts)
 
