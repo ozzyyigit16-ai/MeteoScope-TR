@@ -578,37 +578,40 @@ def _temperature_color(value):
 
 
 def build_turkey_temperature_map(rows, metric="temperature_2m_max"):
-  """Anahtarsız OpenStreetMap tabanında Türkiye'ye odaklı il merkezi sıcaklık haritası."""
+  """Dünya görünümünü engelleyerek yalnızca Türkiye ölçeğinde çalışan meteoroloji haritası."""
   if not rows:
     return None
-  m = folium.Map(
-      location=[39.0, 35.0],
-      zoom_start=5,
-      tiles="OpenStreetMap",
-      control_scale=True,
-      prefer_canvas=True,
-      min_zoom=4,
-      max_zoom=11,
-  )
   turkey_bounds = [[35.7, 25.5], [42.2, 44.9]]
-  m.fit_bounds(turkey_bounds)
+  m = folium.Map(
+      location=[39.0, 35.0], zoom_start=5.8, tiles="OpenStreetMap",
+      control_scale=True, prefer_canvas=True, min_zoom=5.5, max_zoom=10,
+      max_bounds=True, zoom_control=True,
+  )
+  m.fit_bounds(turkey_bounds, padding=(12, 12))
+  m.options["maxBounds"] = turkey_bounds
+  m.options["maxBoundsViscosity"] = 1.0
 
   points = folium.FeatureGroup(name="İl merkezi sıcaklıkları", show=True)
   heat = []
   for row in rows:
     value = row.get(metric)
-    lat, lon = row.get("enlem"), row.get("boylam")
     try:
-      lat, lon = float(lat), float(lon)
+      lat, lon = float(row.get("enlem")), float(row.get("boylam"))
       if not (math.isfinite(lat) and math.isfinite(lon)):
         continue
     except (TypeError, ValueError):
       continue
     color = _temperature_color(value)
     city = html_lib.escape(str(row.get("il", "")))
-    temp_text = f"{float(value):.1f} °C" if value is not None and pd.notna(value) else "Veri yok"
+    try:
+      temp_text = f"{float(value):.1f} °C" if value is not None and pd.notna(value) else "Veri yok"
+    except (TypeError, ValueError):
+      temp_text = "Veri yok"
     rain = row.get("precipitation_sum")
-    rain_text = f"{float(rain):.1f} mm" if rain is not None and pd.notna(rain) else "Veri yok"
+    try:
+      rain_text = f"{float(rain):.1f} mm" if rain is not None and pd.notna(rain) else "Veri yok"
+    except (TypeError, ValueError):
+      rain_text = "Veri yok"
     popup_html = (
       f"<div style='min-width:180px'><b>{city}</b><hr>"
       f"<b>Gösterilen sıcaklık:</b> {temp_text}<br>"
@@ -630,13 +633,11 @@ def build_turkey_temperature_map(rows, metric="temperature_2m_max"):
         heat.append([lat, lon, max(0.05, min(1.0, (numeric_value + 20.0) / 60.0))])
     except (TypeError, ValueError):
       pass
-
   points.add_to(m)
   if heat:
     heat_layer = folium.FeatureGroup(name="Sıcaklık yoğunluk görünümü", show=False)
     HeatMap(heat, radius=25, blur=18, min_opacity=0.22).add_to(heat_layer)
     heat_layer.add_to(m)
-
   legend = """
   <div style="position:fixed;left:58px;bottom:28px;z-index:9999;background:rgba(255,255,255,.96);
        padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;
@@ -1123,10 +1124,10 @@ if seyahat_acik:
       ulasim_turu = st.selectbox("Seyahat türü", ["Özel araç", "Otobüs", "Uçak", "Deniz yolu", "Tren"], key="route_transport_mode")
     with col_t2:
       today_route = date.today()
-      route_max_date = today_route + timedelta(days=16)
+      route_max_date = today_route + timedelta(days=15)
       planlanan_tarih = st.date_input("Planlanan seyahat tarihi", value=today_route,
           min_value=today_route, max_value=route_max_date, key="route_travel_date",
-          help="Hava tahmini için Open-Meteo'nun desteklediği yakın dönem aralığıyla sınırlıdır.")
+          help="Open-Meteo tahmin ufku en fazla 16 gündür; bugün dahil sayıldığı için en ileri tarih bugün +15 gündür.")
 
     rota_sorgula = st.button("Türkiye Rotasını ve Ulaşım Uygunluğunu Analiz Et 🇹🇷", type="primary")
 
@@ -1210,56 +1211,98 @@ if seyahat_acik:
                                    lon_b + (lon_v-lon_b)*i/(n_samples-1)) for i in range(n_samples)]
 
                   weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
-                  def get_date_weather(lat, lon):
+
+                  def parse_date_weather(payload, target_date):
+                    """Normalize one Open-Meteo location response into daily route metrics."""
+                    if not isinstance(payload, dict):
+                      return {"_error": "Hava servisi beklenen JSON biçimini döndürmedi"}
+                    if payload.get("error"):
+                      return {"_error": str(payload.get("reason") or payload.get("error"))}
+                    hourly = payload.get("hourly") or {}
+                    times = hourly.get("time") or []
+                    if not times:
+                      return {"_error": "API yanıtında saatlik tahmin bulunamadı"}
+                    day_indices = [i for i, t in enumerate(times) if str(t)[:10] == target_date]
+                    if not day_indices:
+                      return {"_error": f"{target_date} tarihi tahmin yanıtında bulunamadı"}
+
+                    def vals(key):
+                      arr = hourly.get(key) or []
+                      return [arr[i] for i in day_indices if i < len(arr) and arr[i] is not None]
+
+                    temps = vals("temperature_2m")
+                    precip = vals("precipitation")
+                    snow = vals("snowfall")
+                    wind = vals("wind_speed_10m")
+                    gust = vals("wind_gusts_10m")
+                    codes = vals("weather_code")
+                    gust_arr = hourly.get("wind_gusts_10m") or []
+                    precip_arr = hourly.get("precipitation") or []
+                    peak_gust_i = max(day_indices, key=lambda i: gust_arr[i] if i < len(gust_arr) and gust_arr[i] is not None else -1)
+                    peak_rain_i = max(day_indices, key=lambda i: precip_arr[i] if i < len(precip_arr) and precip_arr[i] is not None else -1)
+                    if not any(v is not None for v in (temps or [None]) + (precip or [None]) + (snow or [None]) + (wind or [None]) + (gust or [None])):
+                      return {"_error": "Seçilen gün için meteorolojik değişkenler boş döndü"}
+                    return {
+                      "temperature_2m": min(temps) if temps else None,
+                      "temperature_max": max(temps) if temps else None,
+                      "precipitation": sum(precip) if precip else None,
+                      "precipitation_peak": max(precip) if precip else None,
+                      "snowfall": sum(snow) if snow else None,
+                      "wind_speed_10m": max(wind) if wind else None,
+                      "wind_gusts_10m": max(gust) if gust else None,
+                      "weather_code": codes[0] if codes else None,
+                      "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
+                      "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
+                      "_error": None
+                    }
+
+                  def get_date_weather_batch(points):
+                    """Fetch all route coordinates in one request, then fall back per point."""
+                    target_date = planlanan_tarih.isoformat()
+                    latitudes = ",".join(str(round(float(xy[0]), 4)) for xy in points)
+                    longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
+                    params = {
+                      "latitude": latitudes, "longitude": longitudes,
+                      "hourly": weather_vars, "forecast_days": 16,
+                      "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+                      "precipitation_unit": "mm"
+                    }
+                    batch_error = None
                     try:
-                      params = {
-                        "latitude": round(float(lat), 4), "longitude": round(float(lon), 4),
-                        "hourly": weather_vars,
-                        "start_date": planlanan_tarih.isoformat(), "end_date": planlanan_tarih.isoformat(),
-                        "forecast_days": 16, "timezone": "auto", "wind_speed_unit": "kmh",
-                        "precipitation_unit": "mm"
-                      }
-                      resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
+                      resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=30)
                       resp.raise_for_status()
                       payload = resp.json()
-                      if payload.get("error"):
-                        return {"_error": str(payload.get("reason", payload.get("error")))}
-                      hourly = payload.get("hourly") or {}
-                      times = hourly.get("time") or []
-                      if not times:
-                        return {"_error": "API yanıtında saatlik tahmin bulunamadı"}
-                      # Analyze the entire selected date, not a single arbitrary noon hour.
-                      day_indices = [i for i, t in enumerate(times) if str(t).startswith(planlanan_tarih.isoformat())]
-                      if not day_indices:
-                        return {"_error": "Seçilen tarih tahmin kapsamı dışında"}
-                      def vals(key):
-                        arr = hourly.get(key) or []
-                        return [arr[i] for i in day_indices if i < len(arr) and arr[i] is not None]
-                      temps, precip, snow, wind, gust = (vals(k) for k in ["temperature_2m", "precipitation", "snowfall", "wind_speed_10m", "wind_gusts_10m"])
-                      codes = vals("weather_code")
-                      # Risk evaluation uses daily extremes/accumulations; retain time of peak gust/rain.
-                      gust_arr = hourly.get("wind_gusts_10m") or []
-                      precip_arr = hourly.get("precipitation") or []
-                      peak_gust_i = max(day_indices, key=lambda i: gust_arr[i] if i < len(gust_arr) and gust_arr[i] is not None else -1)
-                      peak_rain_i = max(day_indices, key=lambda i: precip_arr[i] if i < len(precip_arr) and precip_arr[i] is not None else -1)
-                      return {
-                        "temperature_2m": min(temps) if temps else None,
-                        "temperature_max": max(temps) if temps else None,
-                        "precipitation": sum(precip) if precip else None,
-                        "precipitation_peak": max(precip) if precip else None,
-                        "snowfall": sum(snow) if snow else None,
-                        "wind_speed_10m": max(wind) if wind else None,
-                        "wind_gusts_10m": max(gust) if gust else None,
-                        "weather_code": codes[0] if codes else None,
-                        "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
-                        "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
-                        "_error": None
-                      }
+                      if isinstance(payload, list) and len(payload) == len(points):
+                        return [parse_date_weather(item, target_date) for item in payload]
+                      if len(points) == 1 and isinstance(payload, dict):
+                        return [parse_date_weather(payload, target_date)]
+                      if isinstance(payload, dict) and payload.get("error"):
+                        batch_error = str(payload.get("reason") or payload.get("error"))
+                      else:
+                        batch_error = "Toplu hava yanıtı rota noktalarıyla eşleşmedi"
                     except Exception as exc:
-                      return {"_error": str(exc)}
+                      batch_error = f"Toplu sorgu başarısız: {exc}"
 
-                  with ThreadPoolExecutor(max_workers=min(8, len(sample_pts))) as ex:
-                    route_weather = list(ex.map(lambda xy: get_date_weather(xy[0], xy[1]), sample_pts))
+                    # A single batch failure must not make every route segment unknown.
+                    def get_one(xy):
+                      try:
+                        one_params = {
+                          "latitude": round(float(xy[0]), 4),
+                          "longitude": round(float(xy[1]), 4),
+                          "hourly": weather_vars, "forecast_days": 16,
+                          "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+                          "precipitation_unit": "mm"
+                        }
+                        one_resp = requests.get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=25)
+                        one_resp.raise_for_status()
+                        return parse_date_weather(one_resp.json(), target_date)
+                      except Exception as exc:
+                        return {"_error": f"{exc} (toplu sorgu: {batch_error})"}
+
+                    with ThreadPoolExecutor(max_workers=min(5, len(points))) as fallback_pool:
+                      return list(fallback_pool.map(get_one, points))
+
+                  route_weather = get_date_weather_batch(sample_pts)
 
                   risk_markers=[]; report_rows=[]; route_status="unknown"
                   valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
@@ -1328,7 +1371,7 @@ if seyahat_acik:
         st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
         if r_info.get("duration_s"):
           st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır; kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
+      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
       coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
       st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
