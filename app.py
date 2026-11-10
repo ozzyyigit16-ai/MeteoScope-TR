@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 from contextlib import contextmanager
 from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+from types import SimpleNamespace
 import folium
 from folium.plugins import Fullscreen, LocateControl, HeatMap
 from folium.raster_layers import TileLayer
@@ -20,6 +22,82 @@ import tempfile
 import streamlit.components.v1 as components
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from geopy.distance import geodesic
+
+
+class TemporaryServiceError(RuntimeError):
+  """Geçici servis/ağ sorunları için kullanıcıya güvenli mesaj taşıyan hata."""
+  def __init__(self, service, reason, status_code=None):
+    self.service = service
+    self.status_code = status_code
+    self.reason = str(reason)
+    super().__init__(self.reason)
+
+
+def _request_get(url, *args, **kwargs):
+  """Uygulamadaki HTTP GET çağrılarını sınırlı ve kontrollü biçimde tekrarlar.
+
+  429 yanıtında Retry-After başlığına uyar; uzun beklemelerde uygulamayı
+  kilitlememek için tek denemede en fazla 4 saniye bekler.
+  """
+  service = str(url).split('/')[2] if '://' in str(url) else 'uzak servis'
+  last_error = None
+  for attempt in range(3):
+    try:
+      response = requests.get(url, *args, **kwargs)
+      if response.status_code == 429:
+        retry_after = response.headers.get('Retry-After', '')
+        try:
+          wait_seconds = min(4.0, max(0.5, float(retry_after))) if retry_after else (1.0 + attempt)
+        except (TypeError, ValueError):
+          wait_seconds = 1.0 + attempt
+        last_error = TemporaryServiceError(service, 'HTTP 429 - istek sınırı', 429)
+        if attempt < 2:
+          time.sleep(wait_seconds)
+          continue
+        raise last_error
+      if response.status_code in (500, 502, 503, 504):
+        last_error = TemporaryServiceError(service, f'HTTP {response.status_code}', response.status_code)
+        if attempt < 2:
+          time.sleep(0.5 * (attempt + 1))
+          continue
+        raise last_error
+      return response
+    except (requests.Timeout, requests.ConnectionError) as exc:
+      last_error = exc
+      if attempt < 2:
+        time.sleep(0.5 * (attempt + 1))
+        continue
+      raise TemporaryServiceError(service, type(exc).__name__) from exc
+  if isinstance(last_error, TemporaryServiceError):
+    raise last_error
+  raise TemporaryServiceError(service, str(last_error or 'Bilinmeyen geçici ağ sorunu'))
+
+
+def _is_temporary_service_problem(exc):
+  text = f"{type(exc).__name__}: {exc}".lower()
+  temporary_markers = (
+      '429', 'too many requests', 'rate limit', 'geocoderratelimited',
+      'geocodertimedout', 'geocoderunavailable', 'geocoderquotaexceeded',
+      'timeout', 'timed out', 'connectionerror', 'connection aborted',
+      'connection reset', 'temporarily unavailable', 'service unavailable',
+      'bad gateway', 'gateway timeout', 'http 500', 'http 502', 'http 503', 'http 504',
+      'temporaryserviceerror',
+  )
+  return isinstance(exc, TemporaryServiceError) or any(marker in text for marker in temporary_markers)
+
+
+def show_service_issue(context, exc):
+  """Geçici servis sorunlarını kırmızı hata yerine açıklayıcı uyarı olarak sunar.
+  Programlama/veri doğrulama hataları uyarı gibi gizlenmez.
+  """
+  if _is_temporary_service_problem(exc):
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if '429' in text or 'too many requests' in text or 'rate limit' in text or 'geocoderratelimited' in text:
+      st.warning(f"⏳ **Yoğun istek nedeniyle şu anda yanıt alınamıyor.** {context} Servis geçici bir istek sınırı uyguladı. Lütfen kısa bir süre bekleyip yeniden deneyin. Diğer uygulama bölümleri kullanılmaya devam edebilir.")
+    else:
+      st.warning(f"⏳ **Servise şu anda ulaşılamıyor.** {context} Bağlantı veya servis yoğunluğu nedeniyle veri alınamadı. Lütfen biraz sonra yeniden deneyin. Mevcut olmayan veri kesin tahmin veya risksiz durum olarak yorumlanmadı.")
+  else:
+    st.error(f"{context} İşlem tamamlanamadı ({type(exc).__name__}). Bu bir geçici yoğunluk yanıtı olarak sınıflandırılmadı.")
 
 
 def _safe_number(value, default=None):
@@ -346,7 +424,7 @@ def fetch_mgm_official_warnings():
   )
   for url in urls:
     try:
-      response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 MeteoScope-TR/1.0"})
+      response = _request_get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 MeteoScope-TR/1.0"})
       response.raise_for_status()
       raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", response.text, flags=re.I | re.S)
       plain = html_lib.unescape(re.sub(r"<[^>]+>", " ", raw))
@@ -363,7 +441,7 @@ def fetch_mgm_official_warnings():
         return {"status": "active", "text": warning_text[:5000], "url": url}
       last_error = "MGM uyarı bölümü boş veya okunamayan biçimde döndü; uyarı yok sonucu çıkarılmadı."
     except Exception as exc:
-      last_error = f"MGM uyarı servisine ulaşılamadı: {type(exc).__name__}"
+      last_error = f"MGM uyarı servisine ulaşılamadı: {type(exc).__name__}: {str(exc)[:120]}"
   return {"status": "unavailable", "text": last_error or "Resmî uyarı bilgisi şu anda alınamadı.", "url": "https://www.mgm.gov.tr/meteouyari/turkiye.aspx"}
 
 
@@ -500,7 +578,7 @@ def fetch_turkey_model_comparison():
     last_error = None
     for attempt in range(2):
       try:
-        resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=16)
+        resp = _request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=16)
         resp.raise_for_status()
         payload = resp.json()
         if isinstance(payload, dict):
@@ -530,13 +608,17 @@ def fetch_turkey_model_comparison():
         return out
       except Exception as exc:
         last_error = exc
+        # HTTP 429 zaten merkezi HTTP katmanında yeniden denendi;
+        # burada tekrar döngüsüne girip istek sayısını katlama.
+        if isinstance(exc, TemporaryServiceError) and exc.status_code == 429:
+          break
         if attempt == 0:
           time.sleep(0.35)
     raise RuntimeError(f"{model_id}: {type(last_error).__name__}: {str(last_error)[:160]}")
 
   # Model bazında batch çağrıları; API'yi aşırı yüklememek için sınırlı paralellik.
   for label, model_id in TURKEY_MODEL_SOURCES.items():
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
       futures = {pool.submit(request_batch, model_id, batch): batch for batch in batches}
       for fut in as_completed(futures):
         batch = futures[fut]
@@ -688,7 +770,7 @@ def fetch_turkey_national_forecast():
     last_error = None
     for attempt in range(retry_attempts):
       try:
-        response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
+        response = _request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         break
@@ -778,15 +860,21 @@ def fetch_turkey_national_forecast():
       result.append(record)
     return result
   batches = [names[i:i+9] for i in range(0, len(names), 9)]
-  with ThreadPoolExecutor(max_workers=5) as pool:
+  with ThreadPoolExecutor(max_workers=2) as pool:
     future_map = {pool.submit(fetch_batch, batch): batch for batch in batches}
     for future in as_completed(future_map):
       try:
         rows.extend(future.result())
       except Exception as exc:
         batch = future_map[future]
-        # Çoklu konum isteği başarısızsa tekil konumlarla paralel kurtarma denemesi yap.
-        with ThreadPoolExecutor(max_workers=8) as fallback_pool:
+        # Servis 429 ile sınır koyduysa tekil sorgularla yükü büyütme;
+        # bu grubun verisini bilinmiyor olarak bırak ve kullanıcıya uyarı göster.
+        if _is_temporary_service_problem(exc) and ('429' in str(exc) or 'rate limit' in str(exc).lower()):
+          for city in batch:
+            errors.append({"iller":[city],"hata":"Yoğun istek nedeniyle servis geçici sınır uyguladı (HTTP 429)."})
+          continue
+        # Diğer toplu sorgu sorunlarında sınırlı tekil kurtarma denemesi yap.
+        with ThreadPoolExecutor(max_workers=3) as fallback_pool:
           fallback_map = {fallback_pool.submit(fetch_batch, [city], 10, 1): city for city in batch}
           for fallback_future in as_completed(fallback_map):
             city = fallback_map[fallback_future]
@@ -983,7 +1071,30 @@ else:
 
 st.markdown("Dünya haritasında arama yapın veya haritaya tıklayın. Arama kutusu ve işaretçi çift yönlü senkronize edilir; harita seçimi arama alanına yazılır.")
 
-geolocator = Nominatim(user_agent="meteo_app_global_expert_v6", timeout=5)
+# Nominatim kamu servisi istekleri sınırlar. Güzergâh sorgularını önbelleğe alıp
+# istekleri en az 1,2 saniye arayla göndererek HTTP 429 riskini azalt.
+geolocator = Nominatim(user_agent="MeteoScope-TR/1.0", timeout=10)
+route_geocode_limiter = RateLimiter(
+    geolocator.geocode,
+    min_delay_seconds=1.2,
+    max_retries=2,
+    error_wait_seconds=2.5,
+    swallow_exceptions=False,
+)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def geocode_route_location(query):
+    """Cache route geocoding for one day and respect Nominatim's rate limit."""
+    location = route_geocode_limiter(query, country_codes="tr", timeout=10)
+    if location is None:
+        return None
+    # Cache only primitive values; reconstruct a lightweight attribute object at call site.
+    return {
+        "latitude": float(location.latitude),
+        "longitude": float(location.longitude),
+        "address": str(location.address),
+    }
 
 if "lat" not in st.session_state:
   st.session_state.lat = 41.0082
@@ -1181,8 +1292,12 @@ if seyahat_acik:
       else:
         with st.spinner("Türkiye içindeki konumlar, ulaşım bağlantıları ve rota ağı kontrol ediliyor..."):
           try:
-            loc_b = geolocator.geocode(baslangic_yer, country_codes="tr", timeout=8)
-            loc_v = geolocator.geocode(bitis_yer, country_codes="tr", timeout=8)
+            # Same place queries are served from cache; new Nominatim requests are
+            # serialized/rate-limited to avoid public-service HTTP 429 responses.
+            loc_b_data = geocode_route_location(baslangic_yer.strip())
+            loc_v_data = geocode_route_location(bitis_yer.strip())
+            loc_b = SimpleNamespace(**loc_b_data) if loc_b_data else None
+            loc_v = SimpleNamespace(**loc_v_data) if loc_v_data else None
             if not loc_b or not loc_v:
               st.error("Başlangıç veya varış Türkiye içinde bulunamadı. İl/ilçe adıyla tekrar deneyin.")
             else:
@@ -1217,7 +1332,22 @@ if seyahat_acik:
                   try:
                     osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
                       f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
-                    osrm_resp = requests.get(osrm_url, params={"overview":"full", "geometries":"geojson", "steps":"false"}, timeout=15)
+                    osrm_resp = None
+                    for osrm_attempt in range(3):
+                      osrm_resp = _request_get(
+                        osrm_url,
+                        params={"overview":"full", "geometries":"geojson", "steps":"false"},
+                        timeout=15,
+                        headers={"User-Agent": "MeteoScope-TR/1.0"},
+                      )
+                      if osrm_resp.status_code != 429 or osrm_attempt == 2:
+                        break
+                      retry_after = osrm_resp.headers.get("Retry-After", "2")
+                      try:
+                        wait_seconds = max(1.0, min(float(retry_after), 8.0))
+                      except (TypeError, ValueError):
+                        wait_seconds = 2.0 * (osrm_attempt + 1)
+                      time.sleep(wait_seconds)
                     osrm_resp.raise_for_status(); osrm_json=osrm_resp.json()
                     if osrm_json.get("code") == "Ok" and osrm_json.get("routes"):
                       rr=osrm_json["routes"][0]
@@ -1227,7 +1357,7 @@ if seyahat_acik:
                     else:
                       raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
                   except Exception as route_err:
-                    st.error(f"Gerçek karayolu rotası alınamadı: {route_err}. Düz çizgiyle rota varmış gibi gösterilmeyecek.")
+                    show_service_issue("Gerçek karayolu rotası alınamadı; düz çizgiyle rota varmış gibi gösterilmeyecek.", route_err)
                     st.session_state.route_map_data=None
                 else:
                   # Non-road modes: show only a clearly labelled schematic connection.
@@ -1311,7 +1441,7 @@ if seyahat_acik:
                     }
                     batch_error = None
                     try:
-                      resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=30)
+                      resp = _request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=30)
                       resp.raise_for_status()
                       payload = resp.json()
                       if isinstance(payload, list) and len(payload) == len(points):
@@ -1324,6 +1454,8 @@ if seyahat_acik:
                         batch_error = "Toplu hava yanıtı rota noktalarıyla eşleşmedi"
                     except Exception as exc:
                       batch_error = f"Toplu sorgu başarısız: {exc}"
+                      if _is_temporary_service_problem(exc) and ('429' in str(exc) or 'rate limit' in str(exc).lower()):
+                        return [{"_error": "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."} for _ in points]
 
                     # A single batch failure must not make every route segment unknown.
                     def get_one(xy):
@@ -1335,7 +1467,7 @@ if seyahat_acik:
                           "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
                           "precipitation_unit": "mm"
                         }
-                        one_resp = requests.get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=25)
+                        one_resp = _request_get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=25)
                         one_resp.raise_for_status()
                         return parse_date_weather(one_resp.json(), target_date)
                       except Exception as exc:
@@ -1403,7 +1535,7 @@ if seyahat_acik:
                     "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
                   st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
           except Exception as e:
-            st.error(f"Türkiye içi güzergâh analiz hatası: {e}")
+            show_service_issue("Türkiye içi güzergâh analizi tamamlanamadı.", e)
 
     if st.session_state.get("route_map_data"):
       r_info=st.session_state.route_map_data
@@ -1417,7 +1549,11 @@ if seyahat_acik:
       coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
       st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
-        st.info("⚪ Güzergâh hava riski bilinmiyor: seçilen tarih için tahmin kapsamı dışında kalan veya yanıt vermeyen rota noktaları var. Tablo hata ayrıntılarını gösterir; bu durum risksiz anlamına gelmez.")
+        route_error_text = " ".join(str(item.get("Açıklama", "")) for item in r_info.get("report_table", []))
+        if _is_temporary_service_problem(route_error_text):
+          show_service_issue("Güzergâhın hava tahmin verileri şu anda alınamadı. Bu nedenle risk durumu bilinmiyor; risksiz kabul edilmemelidir.", route_error_text)
+        else:
+          st.info("⚪ Güzergâh hava riski bilinmiyor: seçilen tarih için tahmin kapsamı dışında kalan veya yanıt vermeyen rota noktaları var. Tablo hata ayrıntılarını gösterir; bu durum risksiz anlamına gelmez.")
       elif r_info.get("status") == "red":
         st.error("🔴 Güzergâhın en az bir örnek noktasında yüksek risk eşiği aşıldı.")
       elif r_info.get("status") == "orange":
@@ -1497,7 +1633,7 @@ def _open_meteo_get(url, params, timeout=8):
   last_error = None
   for attempt in range(3):
     try:
-      response = requests.get(url, params=params, timeout=timeout)
+      response = _request_get(url, params=params, timeout=timeout)
       try:
         payload = response.json()
       except ValueError as json_exc:
@@ -1673,7 +1809,7 @@ def fetch_archive_data(latitude, longitude, start_date, end_date):
 @st.cache_data(ttl=300, show_spinner=False)
 def get_rainviewer_layers():
   """Return latest observed radar and short-range nowcast tile templates."""
-  response = requests.get("https://api.rainviewer.com/public/weather-maps.json", timeout=8)
+  response = _request_get("https://api.rainviewer.com/public/weather-maps.json", timeout=8)
   response.raise_for_status()
   payload = response.json()
   host = payload.get("host")
@@ -1739,7 +1875,7 @@ if search_button and search_query:
     else:
       st.error("Aradığınız konum küresel harita veritabanında bulunamadı.")
   except Exception as e:
-    st.error(f"Arama hatası: {e}")
+    show_service_issue("Global konum araması tamamlanamadı.", e)
 
 # --- KUSURSUZ İNTERAKTİF HARİTA (ÇİFT YÖNLÜ SENKRONİZASYON) ---
 st.markdown("#### Harita katmanları")
@@ -1780,7 +1916,7 @@ if show_observed_radar or show_radar_nowcast:
       else:
         st.info("RainViewer bu istekte kısa vadeli nowcast karesi yayımlamamış. Bu, konum verisinin bozuk olduğu anlamına gelmez; harita tahmin karosu şu anda sağlayıcıdan alınamıyor. Mevcut yağış için ‘Mevcut yağış radarı’nı açabilir, seçili konumun saatlik yağış tahminini aşağıdaki hava tahmini bölümünden inceleyebilirsin.")
   except Exception as radar_exc:
-    st.warning(f"Yağış katmanları şu anda alınamadı: {radar_exc}")
+    show_service_issue("Yağış radarı katmanı alınamadı; ana harita ve diğer tahminler kullanılabilir.", radar_exc)
 
 folium.Marker(
     [st.session_state.lat, st.session_state.lon],
@@ -2155,7 +2291,11 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
                 st.write(f"**{model_name}**")
                 for err in errs: st.write(f"{', '.join(err['iller'])}: {err['hata']}")
         else:
-          st.info("Model karşılaştırması şu anda alınamadı. Tek model tahmini çoklu model konsensüsü olarak sunulmaz.")
+          model_error_text = str(mc.get("model_errors", {}))
+          if _is_temporary_service_problem(model_error_text):
+            show_service_issue("Türkiye geneli çoklu model karşılaştırması şu anda alınamadı. Tek model tahmini çoklu model konsensüsü olarak sunulmadı.", model_error_text)
+          else:
+            st.info("Model karşılaştırması şu anda alınamadı. Tek model tahmini çoklu model konsensüsü olarak sunulmaz.")
 
         st.markdown("#### Günün Türkiye özeti")
         hottest=ndf.loc[pd.to_numeric(ndf["temperature_2m_max"],errors="coerce").idxmax()] if temps.size else None
@@ -2174,7 +2314,11 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         elif mgm_national_warning.get("status") == "none":
           st.info(mgm_national_warning.get("text", "MGM günlük tahmin raporunun uyarı bölümünde güncel uyarı bulunmadığı açıkça belirtiliyor."))
         else:
-          st.info("MGM resmî uyarı metni şu anda alınamadı; uyarı var/yok şeklinde çıkarım yapılmadı. [MGM MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx)")
+          mgm_text = str(mgm_national_warning.get("text", ""))
+          if _is_temporary_service_problem(mgm_text):
+            show_service_issue("MGM resmî uyarı metni şu anda alınamadı; uyarı var/yok şeklinde çıkarım yapılmadı.", mgm_text)
+          else:
+            st.info("MGM resmî uyarı metni şu anda alınamadı; uyarı var/yok şeklinde çıkarım yapılmadı. [MGM MeteoUYARI haritasını aç](https://www.mgm.gov.tr/meteouyari/turkiye.aspx)")
         national_alerts=turkey_national_alerts(national)
         st.markdown("#### 81 il erken uyarı taraması")
         if national_alerts:
@@ -2188,7 +2332,12 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
           with st.expander(f"Veri alınamayan il grupları ({len(national['errors'])})"):
             for err in national['errors']: st.write(f"{', '.join(err['iller'])}: {err['hata']}")
       else:
-        st.error("Türkiye geneli tahmin verileri şu anda alınamadı. Önceki/eksik veriyle ülke geneli sonucu üretilmedi.")
+        national_errors = national.get("errors", []) if isinstance(national, dict) else []
+        error_text = " ".join(str(item.get("hata", "")) for item in national_errors)
+        if _is_temporary_service_problem(error_text):
+          show_service_issue("Türkiye geneli tahmin verileri alınamadı. Eksik veriyle ülke geneli sonucu üretilmedi.", error_text)
+        else:
+          st.warning("Türkiye geneli tahmin verileri şu anda alınamadı. Eksik veriyle ülke geneli sonucu üretilmedi; lütfen daha sonra yeniden deneyin.")
 
     with tab1:
       st.subheader("🌐 Küresel Modeller Arası Karşılaştırma")
@@ -2378,4 +2527,4 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       st.download_button("📥 Tüm Verileri İndir (CSV)", csv_data, file_name="meteo_forecast.csv", mime="text/csv")
 
   else:
-    st.error(f"Meteoroloji verileri alınamadı: {weather_error}")
+    show_service_issue("Seçili konumun meteoroloji verileri alınamadı.", weather_error)
