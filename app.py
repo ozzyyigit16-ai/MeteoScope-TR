@@ -17,6 +17,7 @@ import sqlite3
 import json
 import re
 import math
+import hashlib
 import html as html_lib
 from io import StringIO
 import tempfile
@@ -1128,18 +1129,57 @@ def _nominatim_call(func, *args, **kwargs):
         return func(*args, **kwargs)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+ROUTE_WEATHER_CACHE_DIR = os.path.join(tempfile.gettempdir(), "meteoscope_route_weather_cache_v2")
+os.makedirs(ROUTE_WEATHER_CACHE_DIR, exist_ok=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _route_weather_batch_cached(latitudes, longitudes, weather_vars, forecast_days=16):
-    """Cache successful multi-coordinate route forecasts for 30 minutes."""
+    """Fetch route weather once; use a clearly-labelled recent successful cache on HTTP 429/outage."""
     params = {
         "latitude": latitudes, "longitude": longitudes,
         "hourly": weather_vars, "forecast_days": forecast_days,
         "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
         "precipitation_unit": "mm"
     }
-    response = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
-    response.raise_for_status()
-    return response.json()
+    cache_key = hashlib.sha256(
+        f"{latitudes}|{longitudes}|{weather_vars}|{forecast_days}".encode("utf-8")
+    ).hexdigest()
+    cache_path = os.path.join(ROUTE_WEATHER_CACHE_DIR, cache_key + ".json")
+
+    try:
+        response = _route_request_get(
+            "https://api.open-meteo.com/v1/forecast",
+            params=params, timeout=15,
+            headers={"User-Agent": "MeteoScope-TR/1.0 route-weather"}
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RuntimeError(str(payload.get("reason") or payload.get("error")))
+        # Only a valid successful response replaces the last-known-good cache.
+        temp_path = cache_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as cache_file:
+            json.dump({"saved_at": time.time(), "payload": payload}, cache_file)
+        os.replace(temp_path, cache_path)
+        return {"_meteoscope_payload": payload, "_meteoscope_stale_cache": False}
+    except Exception as live_error:
+        # Do not turn an unavailable service into a fabricated "safe" result.
+        # A recent successful forecast may be used, but every point is labelled stale.
+        try:
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                cached = json.load(cache_file)
+            age_seconds = time.time() - float(cached.get("saved_at", 0))
+            if age_seconds <= 6 * 60 * 60 and "payload" in cached:
+                return {
+                    "_meteoscope_payload": cached["payload"],
+                    "_meteoscope_stale_cache": True,
+                    "_meteoscope_cache_age_minutes": int(age_seconds // 60),
+                    "_meteoscope_live_error": f"{type(live_error).__name__}: {str(live_error)[:180]}"
+                }
+        except Exception:
+            pass
+        raise
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1543,7 +1583,9 @@ if seyahat_acik:
                 # Route sampling: distribute weather checks along the corridor, not only at endpoints.
                 # For road routes, use distance-based density; for schematic connections, interpolate.
                 route_km = (route_distance_m / 1000.0) if route_distance_m else straight_km
-                n_samples = max(5, min(15, int(route_km / 100.0) + 2))
+                # Aşırı sayıda koordinat üretmek yerine 5-9 temsilî nokta kullan.
+                # Tek çoklu-konum API isteğiyle tüm koridor taranır.
+                n_samples = max(5, min(9, int(route_km / 150.0) + 2))
                 if len(route_geometry) > 2:
                   sample_indices = sorted(set(round(i * (len(route_geometry)-1) / (n_samples-1)) for i in range(n_samples)))
                   sample_pts = [route_geometry[i] for i in sample_indices]
@@ -1605,11 +1647,23 @@ if seyahat_acik:
                   longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
                   batch_error = None
                   try:
-                    payload = _route_weather_batch_cached(latitudes, longitudes, weather_vars, 16)
+                    cached_result = _route_weather_batch_cached(latitudes, longitudes, weather_vars, 16)
+                    used_stale_cache = bool(cached_result.get("_meteoscope_stale_cache", False)) if isinstance(cached_result, dict) else False
+                    cache_age_minutes = cached_result.get("_meteoscope_cache_age_minutes") if isinstance(cached_result, dict) else None
+                    payload = cached_result.get("_meteoscope_payload") if isinstance(cached_result, dict) and "_meteoscope_payload" in cached_result else cached_result
                     if isinstance(payload, list) and len(payload) == len(points):
-                      return [parse_date_weather(item, target_date) for item in payload]
+                      parsed = [parse_date_weather(item, target_date) for item in payload]
+                      if used_stale_cache:
+                        for item in parsed:
+                          item["_stale_cache"] = True
+                          item["_cache_age_minutes"] = cache_age_minutes
+                      return parsed
                     if len(points) == 1 and isinstance(payload, dict):
-                      return [parse_date_weather(payload, target_date)]
+                      parsed = [parse_date_weather(payload, target_date)]
+                      if used_stale_cache:
+                        parsed[0]["_stale_cache"] = True
+                        parsed[0]["_cache_age_minutes"] = cache_age_minutes
+                      return parsed
                     if isinstance(payload, dict) and payload.get("error"):
                       batch_error = str(payload.get("reason") or payload.get("error"))
                     else:
@@ -1617,12 +1671,14 @@ if seyahat_acik:
                   except Exception as exc:
                     batch_error = f"Toplu sorgu başarısız: {exc}"
                     if _is_temporary_service_problem(exc):
-                      # Do not amplify a temporary outage/rate limit with up to
-                      # 15 parallel fallback calls. Report unavailable data clearly.
+                      # A 429 is not retried point-by-point: that would multiply load.
+                      # Keep the actual provider visible so the next failure is diagnosable.
+                      service_name = getattr(exc, "service", "Open-Meteo")
+                      status_code = getattr(exc, "status_code", None)
                       if '429' in str(exc).lower() or 'rate limit' in str(exc).lower():
-                        reason = "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."
+                        reason = f"{service_name} servisi HTTP {status_code or 429} istek sınırı uyguladı; bu nedenle canlı rota tahmini alınamadı."
                       else:
-                        reason = "Hava servisine geçici olarak ulaşılamadı; rota noktaları için toplu tahmin alınamadı."
+                        reason = f"{service_name} servisine geçici olarak ulaşılamadı; rota noktaları için toplu tahmin alınamadı."
                       return [{"_error": reason} for _ in points]
 
                   # Only a non-temporary response/schema mismatch reaches fallback.
@@ -1655,6 +1711,7 @@ if seyahat_acik:
 
                 risk_markers=[]; report_rows=[]; route_status="unknown"
                 reverse_address_count = 0
+                stale_weather_count = sum(1 for item in route_weather if item and item.get("_stale_cache"))
                 valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
                 if valid_weather_count:
                   route_status = "green" if valid_weather_count == len(sample_pts) else "partial"
@@ -1663,7 +1720,7 @@ if seyahat_acik:
                   if not wx or wx.get("_error") or not any(wx.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")):
                     err = (wx or {}).get("_error", "Tahmin verisi yok")
                     point_address = f"Açık adres çözümlenmedi (koordinat: {xy[0]:.5f}, {xy[1]:.5f})"
-                    report_rows.append({"Rota noktası":point_name,"Riskli konumun açık adresi":point_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err})
+                    report_rows.append({"Rota noktası":point_name,"Riskli konumun açık adresi":point_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err,"Veri kaynağı":"Alınamadı"})
                     continue
                   temp=wx.get("temperature_2m"); temp_max=wx.get("temperature_max")
                   snow=wx.get("snowfall"); precip=wx.get("precipitation")
@@ -1705,9 +1762,12 @@ if seyahat_acik:
                     "Kar toplamı":f"{snow:.1f} cm" if snow is not None else "Veri yok",
                     "Rüzgâr hamlesi":f"{gust:.0f} km/sa" if gust is not None else "Veri yok",
                     "Risk":"; ".join(risks) if risks else "Belirgin eşik aşımı saptanmadı",
-                    "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi"
+                    "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi",
+                    "Veri kaynağı":(f"Son başarılı önbellek · {wx.get('_cache_age_minutes', '?')} dk önce" if wx.get("_stale_cache") else "Canlı Open-Meteo")
                   })
 
+                if stale_weather_count and route_status not in ("red", "orange"):
+                  route_status = "partial"
                 sample_markers=[{"lat":xy[0],"lon":xy[1],"name":f"Rota hava noktası {i+1}","risk":False,"desc":("Tahmin verisi alınamadı" if not wx or wx.get("_error") else "Rota boyunca meteorolojik kontrol noktası")}
                                 for i,(xy,wx) in enumerate(zip(sample_pts,route_weather))]
                 markers=[{"lat":lat_b,"lon":lon_b,"name":"Başlangıç: "+loc_b.address,"risk":False,"desc":"Başlangıç konumu"},
@@ -1716,11 +1776,14 @@ if seyahat_acik:
                   "lat_b":lat_b,"lon_b":lon_b,"lat_v":lat_v,"lon_v":lon_v,"markers":markers,
                   "route_geometry":route_geometry,"route_source":route_source,"report_table":report_rows,
                   "status":route_status,"weather_coverage":valid_weather_count,"weather_total":len(sample_pts),
+                  "stale_weather_count":stale_weather_count,
                   "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
                   "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
                 st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
           except Exception as e:
             show_service_issue("Güzergâhın bazı analiz verileri alınamadı. Konumlar çözümlendiyse harita ve açıklayıcı rapor yine gösterilecek.", e)
+            if isinstance(e, TemporaryServiceError):
+              st.caption(f"Güzergâh servis ayrıntısı: {e.service}" + (f" · HTTP {e.status_code}" if e.status_code else ""))
             try:
               if "loc_b" in locals() and "loc_v" in locals() and loc_b and loc_v:
                 _lb, _lob = float(loc_b.latitude), float(loc_b.longitude)
@@ -1763,6 +1826,9 @@ if seyahat_acik:
         st.metric("Tahmini sürüş", f"{duration/3600:.1f} saat" if duration else "—")
       with metric_cols[2]:
         st.metric("Hava verisi", f"{coverage}/{total_points}" if total_points else "Alınamadı")
+      stale_count = int(r_info.get("stale_weather_count", 0) or 0)
+      if stale_count:
+        st.warning(f"Canlı hava servisi yanıt vermedi. {stale_count} rota noktası son başarılı önbellekteki tahminle gösteriliyor; bu veriler güncel olmayabilir. Tarih ve veri kaynağı raporda ayrıca belirtilmiştir.")
 
       status = r_info.get("status", "unknown")
       report_rows = r_info.get("report_table") or []
