@@ -1423,7 +1423,7 @@ if seyahat_acik:
           min_value=today_route, max_value=route_max_date, key="route_travel_date",
           help="Open-Meteo tahmin ufku en fazla 16 gündür; bugün dahil sayıldığı için en ileri tarih bugün +15 gündür.")
 
-    rota_sorgula = st.button("Türkiye Rotasını ve Ulaşım Uygunluğunu Analiz Et 🇹🇷", type="primary")
+    rota_sorgula = st.button("Rotayı ve Hava Risklerini Analiz Et 🇹🇷", type="primary")
 
     if rota_sorgula:
       # Yalnızca yeni ve açık bir sorguda eski raporu temizle.
@@ -1433,7 +1433,7 @@ if seyahat_acik:
       elif _tr_norm(baslangic_yer) == _tr_norm(bitis_yer):
         st.warning("Başlangıç ve varış aynı görünüyor. Farklı konumlar gir.")
       else:
-        with st.spinner("Güzergâh hazırlanıyor: konumlar doğrulanıyor, yol ağı ve hava tahminleri kontrol ediliyor. Servis yanıt vermezse açıklayıcı uyarı gösterilecek..."):
+        with st.spinner("Rota bulunuyor ve yol boyunca hava koşulları analiz ediliyor..."):
           try:
             # Same place queries are served from cache; new Nominatim requests are
             # serialized/rate-limited to avoid public-service HTTP 429 responses.
@@ -1449,13 +1449,7 @@ if seyahat_acik:
                 missing.append(f"Varış konumu çözümlenemedi: {bitis_yer.strip()}")
               st.error("Başlangıç veya varış konumu adres servislerinde bulunamadı. İlçe/mahalle adıyla daha açık yazmayı deneyin.")
               st.info("Adres çözümleme tamamlanamadığı için gerçek rota geometrisi ve yol üstü risk hesabı üretilemedi. Yanlış konum üzerinden tahmin göstermek yerine işlem durduruldu.")
-              st.dataframe(pd.DataFrame([{
-                "Kontrol": "Adres çözümleme",
-                "Başlangıç": baslangic_yer.strip(),
-                "Varış": bitis_yer.strip(),
-                "Sonuç": "Başarısız",
-                "Açıklama": " · ".join(missing)
-              }]), use_container_width=True, hide_index=True)
+              st.caption("Eksik konum: " + " · ".join(missing))
             else:
               # Prevent accidentally geocoding an ambiguous non-Turkey result.
               if "turkiye" not in _tr_norm(loc_b.address) and "turkey" not in _tr_norm(loc_b.address):
@@ -1754,66 +1748,106 @@ if seyahat_acik:
                 st.error(f"Güzergâh haritası hazırlanamadı: {fallback_error}")
 
     if st.session_state.get("route_map_data"):
-      r_info=st.session_state.route_map_data
-      st.markdown("### 📋 Seyahat uygunluğu ve yol üstü risk raporu")
-      st.write(f"**Tarih:** {r_info['date']} · **Tür:** {r_info['mode']} · **Kaynak:** {r_info['route_source']}")
-      if r_info.get("distance_m"):
-        st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
-        if r_info.get("duration_s"):
-          st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır. Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Aynı rota için başarılı toplu hava tahmini 30 dakika önbellekten kullanılır. HTTP 429 durumunda tekrar tekrar istek gönderilmez; başlangıç-varış haritası ve hata açıklamalı rapor korunur. Riskli noktaların en fazla üçü için açık adres sorgulanır; diğerleri koordinatla gösterilir. Açık adres, yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
-      coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
-      st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
-      if r_info.get("status") == "unknown":
-        route_error_text = " ".join(str(item.get("Açıklama", "")) for item in r_info.get("report_table", []))
-        if _is_temporary_service_problem(route_error_text):
-          show_service_issue("Güzergâhın hava tahmin verileri şu anda alınamadı. Bu nedenle risk durumu bilinmiyor; risksiz kabul edilmemelidir.", route_error_text)
-        else:
-          st.info("⚪ Güzergâh hava riski bilinmiyor: seçilen tarih için tahmin kapsamı dışında kalan veya yanıt vermeyen rota noktaları var. Tablo hata ayrıntılarını gösterir; bu durum risksiz anlamına gelmez.")
-      elif r_info.get("status") == "red":
-        st.error("🔴 Güzergâhın en az bir örnek noktasında yüksek risk eşiği aşıldı.")
-      elif r_info.get("status") == "orange":
-        st.warning("🟠 Güzergâhın en az bir örnek noktasında dikkat gerektiren hava eşiği aşıldı.")
-      elif r_info.get("status") == "partial":
-        st.info("⚪ Güzergâh hava verisi kısmi: bazı örnek noktalarda tahmin alınamadı; tüm rota için risksiz sonucu çıkarılamaz.")
-      if coverage < total_points and r_info.get("status") in ("red", "orange"):
-        st.warning("⚠️ Risk sinyali tespit edildi ancak rota tahmin kapsaması kısmi. Kapsanmayan kesimler için risksiz sonucu çıkarılamaz.")
-      _route_report = r_info.get("report_table") or [{
-        "Rota noktası":"Rapor oluşturulamadı",
-        "Riskli konumun açık adresi":f"{r_info.get('bas_ad','')} → {r_info.get('bit_ad','')}",
-        "Risk":"Bilinmiyor",
-        "Açıklama":"Rota geometrisi mevcut; ayrıntılı meteorolojik tablo oluşturulamadı."
-      }]
-      st.dataframe(pd.DataFrame(_route_report), use_container_width=True, hide_index=True)
+      r_info = st.session_state.route_map_data
+      st.markdown("### 🧭 Güzergâh ve hava risk özeti")
+      st.caption(f"{r_info.get('date', '')} · {r_info.get('mode', '')} · {r_info.get('route_source', '')}")
 
-      st.markdown("### 🗺️ Güzergâh haritası")
-      all_pts=r_info.get("route_geometry") or [(r_info["lat_b"],r_info["lon_b"]),(r_info["lat_v"],r_info["lon_v"])]
-      center_lat=sum(p[0] for p in all_pts)/len(all_pts); center_lon=sum(p[1] for p in all_pts)/len(all_pts)
-      route_m=folium.Map(location=[center_lat,center_lon],zoom_start=6,tiles="OpenStreetMap")
-      if len(all_pts) >= 2:
-        route_m.fit_bounds(all_pts)
-      Fullscreen().add_to(route_m); LocateControl().add_to(route_m)
-      if r_info.get("mode") in ("Özel araç","Otobüs") and len(all_pts)>2:
-        folium.PolyLine(all_pts,color="#2b7bff",weight=5,opacity=0.85,tooltip="OSRM gerçek yol ağı rotası").add_to(route_m)
-      else:
-        folium.PolyLine(all_pts,color="#888888",weight=3,opacity=0.8,dash_array="8,8",tooltip="Şematik bağlantı; gerçek hat değildir").add_to(route_m)
-      for item in r_info["markers"]:
-        if item.get("risk"):
-          sev=item.get("severity", "orange")
-          color="red" if sev=="red" else ("orange" if sev=="orange" else "yellow")
-          icon_name="exclamation-sign"
+      coverage = int(r_info.get("weather_coverage", 0) or 0)
+      total_points = int(r_info.get("weather_total", 0) or 0)
+      metric_cols = st.columns(3)
+      with metric_cols[0]:
+        distance = r_info.get("distance_m")
+        st.metric("Karayolu mesafesi", f"{distance/1000:.0f} km" if distance else "—")
+      with metric_cols[1]:
+        duration = r_info.get("duration_s")
+        st.metric("Tahmini sürüş", f"{duration/3600:.1f} saat" if duration else "—")
+      with metric_cols[2]:
+        st.metric("Hava verisi", f"{coverage}/{total_points}" if total_points else "Alınamadı")
+
+      status = r_info.get("status", "unknown")
+      report_rows = r_info.get("report_table") or []
+      route_error_text = " ".join(str(item.get("Açıklama", "")) for item in report_rows)
+      if status == "unknown":
+        if _is_temporary_service_problem(route_error_text):
+          show_service_issue("Güzergâhın hava tahmin verileri alınamadı. Risk durumu bilinmiyor; rota risksiz kabul edilmemelidir.", route_error_text)
         else:
-          color="blue" if "Başlangıç" in item.get("name","") else "green"
-          icon_name="play" if color=="blue" else "flag"
-        popup=f"<b>{item['name']}</b><br>{item.get('desc','')}"
-        folium.Marker([item["lat"],item["lon"]],popup=folium.Popup(popup,max_width=350),tooltip=item["name"],
-          icon=folium.Icon(color=color,icon=icon_name,prefix="glyphicon")).add_to(route_m)
-      # Güzergâh haritasını streamlit-folium bileşeni olarak değil,
-      # bağımsız HTML iframe olarak çiz. Böylece ana hava haritasının
-      # Streamlit-Folium component state'i / event döngüsüyle paylaşılmaz.
-      # Her iki harita ayrı Folium nesnesi ve ayrı tarayıcı iframe'idir.
-      route_html = route_m.get_root().render()
-      components.html(route_html, height=500, scrolling=False)
+          st.warning("⚪ Hava riski belirlenemedi. Tahmin verisi eksik veya servis yanıtı yetersiz; bu sonuç risksiz anlamına gelmez.")
+      elif status == "red":
+        st.error("🔴 Yüksek hava riski: güzergâhın en az bir bölümünde ciddi meteorolojik eşik aşıldı.")
+      elif status == "orange":
+        st.warning("🟠 Dikkat: güzergâhın en az bir bölümünde dikkat gerektiren hava koşulları bekleniyor.")
+      elif status == "partial":
+        st.warning("⚪ Analiz kısmi: bazı rota noktalarında tahmin alınamadı. Kapsanmayan bölümler risksiz kabul edilemez.")
+      elif status == "green":
+        st.success("🟢 Analiz edilen rota noktalarında tanımlı yüksek/dikkat risk eşikleri aşılmadı. Bu, resmî yol güvenliği garantisi değildir.")
+
+      if coverage < total_points and status in ("red", "orange"):
+        st.caption("Not: Risk sinyali bulundu; ancak hava tahmini tüm rota noktalarını kapsamıyor.")
+
+      # Tablo yerine yalnızca gerçekten dikkat gerektiren noktaları göster.
+      risk_rows = [row for row in report_rows
+                   if row.get("Risk") not in (None, "", "Belirgin eşik aşımı saptanmadı", "Bilinmiyor")]
+      unknown_rows = [row for row in report_rows if row.get("Risk") == "Bilinmiyor"]
+      if risk_rows:
+        st.markdown("**Dikkat gerektiren rota noktaları**")
+        for row in risk_rows[:6]:
+          address = row.get("Riskli konumun açık adresi") or row.get("Koordinat") or "Konum bilgisi yok"
+          details = row.get("Risk", "Risk bilgisi yok")
+          values = []
+          for key in ("Yağış toplamı", "Kar toplamı", "Rüzgâr hamlesi", "En düşük sıcaklık"):
+            value = row.get(key)
+            if value and value != "Veri yok":
+              values.append(f"{key}: {value}")
+          suffix = " · ".join(values)
+          st.markdown(f"- **{address}** — {details}")
+          if suffix:
+            st.caption(suffix)
+        if len(risk_rows) > 6:
+          st.caption(f"Haritada ayrıca {len(risk_rows)-6} risk noktası daha işaretlendi.")
+      elif status == "green":
+        st.caption("Belirlenen eşiklerde risk tespit edilmedi; yine de seyahat öncesi resmî meteorolojik ve yol uyarılarını kontrol edin.")
+      if unknown_rows:
+        st.caption(f"{len(unknown_rows)} rota noktasında hava verisi alınamadı; bu noktalar haritada risk yokmuş gibi gösterilmez.")
+
+      st.caption("Hava analizi seçilen günün saatlik tahminlerinden yapılır. Tahmin ufku 16 güne kadardır ve ileri tarihlerde belirsizlik artar. Haritadaki açık adresler yaklaşık konum tarifidir; yolun şerit veya kapı numarası garantisi değildir.")
+      st.markdown("### 🗺️ Güzergâh haritası")
+      all_pts = r_info.get("route_geometry") or [(r_info["lat_b"], r_info["lon_b"]), (r_info["lat_v"], r_info["lon_v"])]
+      center_lat = sum(p[0] for p in all_pts) / len(all_pts)
+      center_lon = sum(p[1] for p in all_pts) / len(all_pts)
+      route_m = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="OpenStreetMap")
+      # OSRM geometrileri çok sayıda koordinat içerebilir. Harita çizimini hafiflet,
+      # ancak analizde kullanılan özgün geometriyi session_state içinde koru.
+      if len(all_pts) > 1200:
+        step = (len(all_pts) - 1) / 1199
+        display_pts = [all_pts[round(i * step)] for i in range(1200)]
+      else:
+        display_pts = all_pts
+      if len(display_pts) >= 2:
+        route_m.fit_bounds(display_pts)
+      Fullscreen().add_to(route_m)
+      LocateControl().add_to(route_m)
+      if r_info.get("mode") in ("Özel araç", "Otobüs") and len(display_pts) > 2 and "OSRM" in str(r_info.get("route_source", "")):
+        folium.PolyLine(display_pts, color="#2b7bff", weight=5, opacity=0.85,
+                        tooltip="OSRM gerçek yol ağı rotası").add_to(route_m)
+      else:
+        folium.PolyLine(display_pts, color="#888888", weight=3, opacity=0.8,
+                        dash_array="8,8", tooltip="Şematik bağlantı; gerçek hat değildir").add_to(route_m)
+      for item in r_info.get("markers", []):
+        if item.get("risk"):
+          severity = item.get("severity", "orange")
+          color = "red" if severity == "red" else ("orange" if severity == "orange" else "yellow")
+          icon_name = "exclamation-sign"
+        else:
+          color = "blue" if "Başlangıç" in item.get("name", "") else "green"
+          icon_name = "play" if color == "blue" else "flag"
+        popup_text = html_lib.escape(str(item.get("desc", ""))).replace("\n", "<br>")
+        popup_name = html_lib.escape(str(item.get("name", "Rota noktası")))
+        popup = f"<b>{popup_name}</b><br>{popup_text}"
+        folium.Marker([item["lat"], item["lon"]], popup=folium.Popup(popup, max_width=350),
+                      tooltip=str(item.get("name", "Rota noktası")),
+                      icon=folium.Icon(color=color, icon=icon_name, prefix="glyphicon")).add_to(route_m)
+      # Ayrı iframe: ana hava haritasının Streamlit-Folium olay döngüsünden bağımsız.
+      components.html(route_m.get_root().render(), height=500, scrolling=False)
 
 
 # --- OPEN-METEO VERİ MOTORU ---
