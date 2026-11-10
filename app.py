@@ -1134,7 +1134,7 @@ os.makedirs(ROUTE_WEATHER_CACHE_DIR, exist_ok=True)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _route_weather_batch_cached(latitudes, longitudes, weather_vars, forecast_days=16):
+def _route_weather_batch_cached(latitudes, longitudes, weather_vars, forecast_days=7):
     """Fetch route weather once; use a clearly-labelled recent successful cache on HTTP 429/outage."""
     params = {
         "latitude": latitudes, "longitude": longitudes,
@@ -1458,10 +1458,10 @@ if seyahat_acik:
       ulasim_turu = st.selectbox("Seyahat türü", ["Özel araç", "Otobüs", "Uçak", "Deniz yolu", "Tren"], key="route_transport_mode")
     with col_t2:
       today_route = date.today()
-      route_max_date = today_route + timedelta(days=15)
+      route_max_date = today_route + timedelta(days=6)
       planlanan_tarih = st.date_input("Planlanan seyahat tarihi", value=today_route,
           min_value=today_route, max_value=route_max_date, key="route_travel_date",
-          help="Open-Meteo tahmin ufku en fazla 16 gündür; bugün dahil sayıldığı için en ileri tarih bugün +15 gündür.")
+          help="Güzergâh hava riski analizi bugün dahil 7 günlük tahmin aralığını kullanır.")
 
     rota_sorgula = st.button("Rotayı ve Hava Risklerini Analiz Et 🇹🇷", type="primary")
 
@@ -1647,7 +1647,7 @@ if seyahat_acik:
                   longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
                   batch_error = None
                   try:
-                    cached_result = _route_weather_batch_cached(latitudes, longitudes, weather_vars, 16)
+                    cached_result = _route_weather_batch_cached(latitudes, longitudes, weather_vars, 7)
                     used_stale_cache = bool(cached_result.get("_meteoscope_stale_cache", False)) if isinstance(cached_result, dict) else False
                     cache_age_minutes = cached_result.get("_meteoscope_cache_age_minutes") if isinstance(cached_result, dict) else None
                     payload = cached_result.get("_meteoscope_payload") if isinstance(cached_result, dict) and "_meteoscope_payload" in cached_result else cached_result
@@ -1688,7 +1688,7 @@ if seyahat_acik:
                       one_params = {
                         "latitude": round(float(xy[0]), 4),
                         "longitude": round(float(xy[1]), 4),
-                        "hourly": weather_vars, "forecast_days": 16,
+                        "hourly": weather_vars, "forecast_days": 7,
                         "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
                         "precipitation_unit": "mm"
                       }
