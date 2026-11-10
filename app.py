@@ -1415,6 +1415,9 @@ if seyahat_acik:
     rota_sorgula = st.button("Türkiye Rotasını ve Ulaşım Uygunluğunu Analiz Et 🇹🇷", type="primary")
 
     if rota_sorgula:
+      # Yeni sorgu başlarken önceki rotayı ekranda tutma; bu sorgunun sonucu
+      # ne olursa olsun aşağıda açık bir durum/rapor üretilecek.
+      st.session_state.route_map_data = None
       if not baslangic_yer.strip() or not bitis_yer.strip():
         st.warning("Lütfen başlangıç ve varış konumlarını gir.")
       elif _tr_norm(baslangic_yer) == _tr_norm(bitis_yer):
@@ -1439,6 +1442,32 @@ if seyahat_acik:
 
               lat_b, lon_b = float(loc_b.latitude), float(loc_b.longitude)
               lat_v, lon_v = float(loc_v.latitude), float(loc_v.longitude)
+
+              # İlk güvenilir çıktı: dış rota/hava servisleri çağrılmadan önce
+              # başlangıç-varış haritası ve beklemede raporu oturuma yazılır.
+              # Böylece sonraki herhangi bir servis hatası harita bölümünü boş bırakamaz.
+              st.session_state.route_map_data = {
+                "bas_ad": str(loc_b.address), "bit_ad": str(loc_v.address),
+                "lat_b": lat_b, "lon_b": lon_b, "lat_v": lat_v, "lon_v": lon_v,
+                "markers": [
+                  {"lat": lat_b, "lon": lon_b, "name": "Başlangıç: " + str(loc_b.address), "risk": False, "desc": "Başlangıç konumu"},
+                  {"lat": lat_v, "lon": lon_v, "name": "Varış: " + str(loc_v.address), "risk": False, "desc": "Varış konumu"}
+                ],
+                "route_geometry": [(lat_b, lon_b), (lat_v, lon_v)],
+                "route_source": "Ön harita · analiz sürüyor (şematik çizgi, gerçek yol geometrisi değildir)",
+                "report_table": [{
+                  "Rota noktası": "Güzergâh ön kontrolü",
+                  "Riskli konumun açık adresi": f"{loc_b.address} → {loc_v.address}",
+                  "Koordinat": f"{lat_b:.4f}, {lon_b:.4f} → {lat_v:.4f}, {lon_v:.4f}",
+                  "Hava durumu": "Analiz sürüyor",
+                  "Risk": "Henüz hesaplanmadı",
+                  "Açıklama": "Konumlar bulundu. Yol ve meteoroloji servisleri kontrol ediliyor."
+                }],
+                "status": "unknown", "weather_coverage": 0, "weather_total": 0,
+                "date": planlanan_tarih.strftime("%d.%m.%Y"), "mode": ulasim_turu,
+                "mode_reason": "Analiz sürüyor", "distance_m": None, "duration_s": None
+              }
+
               straight_km = geodesic((lat_b, lon_b), (lat_v, lon_v)).km
               mode_ok, mode_reason = _tr_mode_availability(ulasim_turu, loc_b, loc_v, straight_km)
               route_geometry=[]; route_distance_m=None; route_duration_s=None; route_source=""
@@ -1608,6 +1637,7 @@ if seyahat_acik:
                 route_weather = get_date_weather_batch(sample_pts)
 
                 risk_markers=[]; report_rows=[]; route_status="unknown"
+                reverse_address_count = 0
                 valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
                 if valid_weather_count:
                   route_status = "green" if valid_weather_count == len(sample_pts) else "partial"
@@ -1641,7 +1671,13 @@ if seyahat_acik:
                   if risks:
                     if severity == "red": route_status = "red"
                     elif severity == "orange" and route_status not in ("red",): route_status = "orange"
-                    risk_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                    # Kamu adres servisine 15 kez yüklenme. En fazla üç riskli
+                    # noktanın açık adresini çöz; kalan riskler koordinatla korunur.
+                    if reverse_address_count < 3:
+                      risk_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                      reverse_address_count += 1
+                    else:
+                      risk_address = f"Adres sorgusu sınırı: koordinat {xy[0]:.5f}, {xy[1]:.5f}"
                     risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":f"{risk_address} · " + "; ".join(risks)})
                   report_rows.append({
                     "Rota noktası":point_name,"Riskli konumun açık adresi":risk_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
@@ -1689,8 +1725,10 @@ if seyahat_acik:
                   "status":"unknown","weather_coverage":0,"weather_total":0,
                   "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
                   "mode_reason":"Kısmi analiz","distance_m":None,"duration_s":None}
-            except Exception:
-              st.session_state.route_map_data = None
+            except Exception as fallback_error:
+              # Preserve the earliest endpoint-only map rather than erasing it.
+              if not st.session_state.get("route_map_data"):
+                st.error(f"Güzergâh haritası hazırlanamadı: {fallback_error}")
 
     if st.session_state.get("route_map_data"):
       r_info=st.session_state.route_map_data
@@ -1700,7 +1738,7 @@ if seyahat_acik:
         st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
         if r_info.get("duration_s"):
           st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Aynı rota için başarılı toplu hava tahmini 30 dakika önbellekten kullanılır; adres aramasında Nominatim yanıt vermezse yedek Photon servisi denenir. Riskli koordinatlar için en yakın açık adres çözülür; bu adres yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
+      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır. Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Aynı rota için başarılı toplu hava tahmini 30 dakika önbellekten kullanılır. HTTP 429 durumunda tekrar tekrar istek gönderilmez; başlangıç-varış haritası ve hata açıklamalı rapor korunur. Riskli noktaların en fazla üçü için açık adres sorgulanır; diğerleri koordinatla gösterilir. Açık adres, yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
       coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
       st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
