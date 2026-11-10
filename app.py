@@ -1366,242 +1366,264 @@ if seyahat_acik:
               lat_v, lon_v = float(loc_v.latitude), float(loc_v.longitude)
               straight_km = geodesic((lat_b, lon_b), (lat_v, lon_v)).km
               mode_ok, mode_reason = _tr_mode_availability(ulasim_turu, loc_b, loc_v, straight_km)
+              route_geometry=[]; route_distance_m=None; route_duration_s=None; route_source=""
 
               if mode_ok is False:
-                alternatives=[]
-                for candidate in ["Uçak", "Deniz yolu", "Tren"]:
-                  if candidate == ulasim_turu: continue
-                  candidate_ok, _ = _tr_mode_availability(candidate, loc_b, loc_v, straight_km)
-                  if candidate_ok is True: alternatives.append(candidate)
-                if alternatives:
-                  st.error(f"Seçilen seyahat türü doğrulanamadı. {mode_reason}\n\n**Bu iki konum için uygun görünen seçenekler:** " + " ve ".join(alternatives) + ".")
-                else:
-                  st.error(f"Seçilen seyahat türü doğrulanamadı. {mode_reason}\n\n**Uygun ulaşım türü bu veriyle doğrulanamadı.**")
-                st.session_state.route_map_data = None
+                # Ulaşım türü eşleşmesi doğrulanamasa da konumlar çözümlendiyse
+                # harita ve hava analizi kaybolmasın. Şematik çizgi açıkça etiketlenir.
+                st.warning(f"Seçilen ulaşım türü doğrulanamadı: {mode_reason} Harita ve hava analizi şematik bağlantı üzerinden sürdürülecek.")
+                force_schematic_route = True
               elif mode_ok is None:
-                st.warning(mode_reason)
-                st.session_state.route_map_data = None
+                st.warning(f"{mode_reason} Harita ve hava analizi şematik bağlantı üzerinden sürdürülecek.")
+                force_schematic_route = True
               else:
-                route_geometry=[]; route_distance_m=None; route_duration_s=None; route_source=""
-                if ulasim_turu in ("Özel araç", "Otobüs"):
-                  try:
-                    osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
-                      f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
-                    osrm_resp = _route_request_get(
-                      osrm_url,
-                      params={"overview":"full", "geometries":"geojson", "steps":"false"},
-                      timeout=15,
-                      headers={"User-Agent": "MeteoScope-TR/1.0"},
-                    )
-                    osrm_resp.raise_for_status(); osrm_json=osrm_resp.json()
-                    if osrm_json.get("code") == "Ok" and osrm_json.get("routes"):
-                      rr=osrm_json["routes"][0]
-                      route_geometry=[(float(pt[1]), float(pt[0])) for pt in rr["geometry"]["coordinates"]]
-                      route_distance_m=float(rr.get("distance", 0)); route_duration_s=float(rr.get("duration", 0))
-                      route_source="OSRM / OpenStreetMap yol ağı"
-                    else:
-                      raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
-                  except Exception as route_err:
-                    # Yol ağı servisi geçici olarak yanıt vermese de analiz akışını
-                    # tamamen düşürme. Şematik bağlantıyı açıkça etiketle; gerçek
-                    # yol geometrisi veya yol üstü adresiymiş gibi sunma.
-                    show_service_issue("Gerçek yol geometrisi şu anda alınamadı. Güzergâhın şematik bağlantısı ve mevcut hava verileri gösterilecek.", route_err)
-                    route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
-                    route_source="Şematik bağlantı (OSRM yol ağı geçici olarak alınamadı; gerçek yol geometrisi değildir)"
-                    route_distance_m=None
-                    route_duration_s=None
-                else:
-                  # Non-road modes: show only a clearly labelled schematic connection.
-                  route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
-                  route_source="Şematik bağlantı (gerçek sefer/hat geometrisi değildir)"
-                  if ulasim_turu == "Tren":
-                    a_tokens, b_tokens = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
-                    rail_path = _tr_rail_path(a_tokens[0], b_tokens[0]) if a_tokens and b_tokens else None
-                    if rail_path:
-                      route_source += " · demiryolu şehir koridoru: " + " → ".join(rail_path)
-
-                if route_geometry:
-                  # Route sampling: distribute weather checks along the corridor, not only at endpoints.
-                  # For road routes, use distance-based density; for schematic connections, interpolate.
-                  route_km = (route_distance_m / 1000.0) if route_distance_m else straight_km
-                  n_samples = max(5, min(15, int(route_km / 100.0) + 2))
-                  if len(route_geometry) > 2:
-                    sample_indices = sorted(set(round(i * (len(route_geometry)-1) / (n_samples-1)) for i in range(n_samples)))
-                    sample_pts = [route_geometry[i] for i in sample_indices]
+                force_schematic_route = False
+              if force_schematic_route:
+                route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
+                route_source="Şematik bağlantı (ulaşım türü/hat eşleşmesi doğrulanamadı; gerçek yol veya sefer geometrisi değildir)"
+              elif ulasim_turu in ("Özel araç", "Otobüs"):
+                try:
+                  osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
+                    f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
+                  osrm_resp = _route_request_get(
+                    osrm_url,
+                    params={"overview":"full", "geometries":"geojson", "steps":"false"},
+                    timeout=15,
+                    headers={"User-Agent": "MeteoScope-TR/1.0"},
+                  )
+                  osrm_resp.raise_for_status(); osrm_json=osrm_resp.json()
+                  if osrm_json.get("code") == "Ok" and osrm_json.get("routes"):
+                    rr=osrm_json["routes"][0]
+                    route_geometry=[(float(pt[1]), float(pt[0])) for pt in rr["geometry"]["coordinates"]]
+                    route_distance_m=float(rr.get("distance", 0)); route_duration_s=float(rr.get("duration", 0))
+                    route_source="OSRM / OpenStreetMap yol ağı"
                   else:
-                    # Schematic route only: sample between endpoints and label that limitation.
-                    sample_pts = [(lat_b + (lat_v-lat_b)*i/(n_samples-1),
-                                   lon_b + (lon_v-lon_b)*i/(n_samples-1)) for i in range(n_samples)]
+                    raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
+                except Exception as route_err:
+                  # Yol ağı servisi geçici olarak yanıt vermese de analiz akışını
+                  # tamamen düşürme. Şematik bağlantıyı açıkça etiketle; gerçek
+                  # yol geometrisi veya yol üstü adresiymiş gibi sunma.
+                  show_service_issue("Gerçek yol geometrisi şu anda alınamadı. Güzergâhın şematik bağlantısı ve mevcut hava verileri gösterilecek.", route_err)
+                  route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
+                  route_source="Şematik bağlantı (OSRM yol ağı geçici olarak alınamadı; gerçek yol geometrisi değildir)"
+                  route_distance_m=None
+                  route_duration_s=None
+              else:
+                # Non-road modes: show only a clearly labelled schematic connection.
+                route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
+                route_source="Şematik bağlantı (gerçek sefer/hat geometrisi değildir)"
+                if ulasim_turu == "Tren":
+                  a_tokens, b_tokens = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
+                  rail_path = _tr_rail_path(a_tokens[0], b_tokens[0]) if a_tokens and b_tokens else None
+                  if rail_path:
+                    route_source += " · demiryolu şehir koridoru: " + " → ".join(rail_path)
 
-                  weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
+              if route_geometry:
+                # Route sampling: distribute weather checks along the corridor, not only at endpoints.
+                # For road routes, use distance-based density; for schematic connections, interpolate.
+                route_km = (route_distance_m / 1000.0) if route_distance_m else straight_km
+                n_samples = max(5, min(15, int(route_km / 100.0) + 2))
+                if len(route_geometry) > 2:
+                  sample_indices = sorted(set(round(i * (len(route_geometry)-1) / (n_samples-1)) for i in range(n_samples)))
+                  sample_pts = [route_geometry[i] for i in sample_indices]
+                else:
+                  # Schematic route only: sample between endpoints and label that limitation.
+                  sample_pts = [(lat_b + (lat_v-lat_b)*i/(n_samples-1),
+                                 lon_b + (lon_v-lon_b)*i/(n_samples-1)) for i in range(n_samples)]
 
-                  def parse_date_weather(payload, target_date):
-                    """Normalize one Open-Meteo location response into daily route metrics."""
-                    if not isinstance(payload, dict):
-                      return {"_error": "Hava servisi beklenen JSON biçimini döndürmedi"}
-                    if payload.get("error"):
-                      return {"_error": str(payload.get("reason") or payload.get("error"))}
-                    hourly = payload.get("hourly") or {}
-                    times = hourly.get("time") or []
-                    if not times:
-                      return {"_error": "API yanıtında saatlik tahmin bulunamadı"}
-                    day_indices = [i for i, t in enumerate(times) if str(t)[:10] == target_date]
-                    if not day_indices:
-                      return {"_error": f"{target_date} tarihi tahmin yanıtında bulunamadı"}
+                weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
 
-                    def vals(key):
-                      arr = hourly.get(key) or []
-                      return [arr[i] for i in day_indices if i < len(arr) and arr[i] is not None]
+                def parse_date_weather(payload, target_date):
+                  """Normalize one Open-Meteo location response into daily route metrics."""
+                  if not isinstance(payload, dict):
+                    return {"_error": "Hava servisi beklenen JSON biçimini döndürmedi"}
+                  if payload.get("error"):
+                    return {"_error": str(payload.get("reason") or payload.get("error"))}
+                  hourly = payload.get("hourly") or {}
+                  times = hourly.get("time") or []
+                  if not times:
+                    return {"_error": "API yanıtında saatlik tahmin bulunamadı"}
+                  day_indices = [i for i, t in enumerate(times) if str(t)[:10] == target_date]
+                  if not day_indices:
+                    return {"_error": f"{target_date} tarihi tahmin yanıtında bulunamadı"}
 
-                    temps = vals("temperature_2m")
-                    precip = vals("precipitation")
-                    snow = vals("snowfall")
-                    wind = vals("wind_speed_10m")
-                    gust = vals("wind_gusts_10m")
-                    codes = vals("weather_code")
-                    gust_arr = hourly.get("wind_gusts_10m") or []
-                    precip_arr = hourly.get("precipitation") or []
-                    peak_gust_i = max(day_indices, key=lambda i: gust_arr[i] if i < len(gust_arr) and gust_arr[i] is not None else -1)
-                    peak_rain_i = max(day_indices, key=lambda i: precip_arr[i] if i < len(precip_arr) and precip_arr[i] is not None else -1)
-                    if not any(v is not None for v in (temps or [None]) + (precip or [None]) + (snow or [None]) + (wind or [None]) + (gust or [None])):
-                      return {"_error": "Seçilen gün için meteorolojik değişkenler boş döndü"}
-                    return {
-                      "temperature_2m": min(temps) if temps else None,
-                      "temperature_max": max(temps) if temps else None,
-                      "precipitation": sum(precip) if precip else None,
-                      "precipitation_peak": max(precip) if precip else None,
-                      "snowfall": sum(snow) if snow else None,
-                      "wind_speed_10m": max(wind) if wind else None,
-                      "wind_gusts_10m": max(gust) if gust else None,
-                      "weather_code": codes[0] if codes else None,
-                      "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
-                      "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
-                      "_error": None
-                    }
+                  def vals(key):
+                    arr = hourly.get(key) or []
+                    return [arr[i] for i in day_indices if i < len(arr) and arr[i] is not None]
 
-                  def get_date_weather_batch(points):
-                    """Fetch all route coordinates in one request, then fall back per point."""
-                    target_date = planlanan_tarih.isoformat()
-                    latitudes = ",".join(str(round(float(xy[0]), 4)) for xy in points)
-                    longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
-                    params = {
-                      "latitude": latitudes, "longitude": longitudes,
-                      "hourly": weather_vars, "forecast_days": 16,
-                      "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
-                      "precipitation_unit": "mm"
-                    }
-                    batch_error = None
-                    try:
-                      resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
-                      resp.raise_for_status()
-                      payload = resp.json()
-                      if isinstance(payload, list) and len(payload) == len(points):
-                        return [parse_date_weather(item, target_date) for item in payload]
-                      if len(points) == 1 and isinstance(payload, dict):
-                        return [parse_date_weather(payload, target_date)]
-                      if isinstance(payload, dict) and payload.get("error"):
-                        batch_error = str(payload.get("reason") or payload.get("error"))
+                  temps = vals("temperature_2m")
+                  precip = vals("precipitation")
+                  snow = vals("snowfall")
+                  wind = vals("wind_speed_10m")
+                  gust = vals("wind_gusts_10m")
+                  codes = vals("weather_code")
+                  gust_arr = hourly.get("wind_gusts_10m") or []
+                  precip_arr = hourly.get("precipitation") or []
+                  peak_gust_i = max(day_indices, key=lambda i: gust_arr[i] if i < len(gust_arr) and gust_arr[i] is not None else -1)
+                  peak_rain_i = max(day_indices, key=lambda i: precip_arr[i] if i < len(precip_arr) and precip_arr[i] is not None else -1)
+                  if not any(v is not None for v in (temps or [None]) + (precip or [None]) + (snow or [None]) + (wind or [None]) + (gust or [None])):
+                    return {"_error": "Seçilen gün için meteorolojik değişkenler boş döndü"}
+                  return {
+                    "temperature_2m": min(temps) if temps else None,
+                    "temperature_max": max(temps) if temps else None,
+                    "precipitation": sum(precip) if precip else None,
+                    "precipitation_peak": max(precip) if precip else None,
+                    "snowfall": sum(snow) if snow else None,
+                    "wind_speed_10m": max(wind) if wind else None,
+                    "wind_gusts_10m": max(gust) if gust else None,
+                    "weather_code": codes[0] if codes else None,
+                    "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
+                    "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
+                    "_error": None
+                  }
+
+                def get_date_weather_batch(points):
+                  """Fetch all route coordinates in one request, then fall back per point."""
+                  target_date = planlanan_tarih.isoformat()
+                  latitudes = ",".join(str(round(float(xy[0]), 4)) for xy in points)
+                  longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
+                  params = {
+                    "latitude": latitudes, "longitude": longitudes,
+                    "hourly": weather_vars, "forecast_days": 16,
+                    "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+                    "precipitation_unit": "mm"
+                  }
+                  batch_error = None
+                  try:
+                    resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    if isinstance(payload, list) and len(payload) == len(points):
+                      return [parse_date_weather(item, target_date) for item in payload]
+                    if len(points) == 1 and isinstance(payload, dict):
+                      return [parse_date_weather(payload, target_date)]
+                    if isinstance(payload, dict) and payload.get("error"):
+                      batch_error = str(payload.get("reason") or payload.get("error"))
+                    else:
+                      batch_error = "Toplu hava yanıtı rota noktalarıyla eşleşmedi"
+                  except Exception as exc:
+                    batch_error = f"Toplu sorgu başarısız: {exc}"
+                    if _is_temporary_service_problem(exc):
+                      # Do not amplify a temporary outage/rate limit with up to
+                      # 15 parallel fallback calls. Report unavailable data clearly.
+                      if '429' in str(exc).lower() or 'rate limit' in str(exc).lower():
+                        reason = "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."
                       else:
-                        batch_error = "Toplu hava yanıtı rota noktalarıyla eşleşmedi"
+                        reason = "Hava servisine geçici olarak ulaşılamadı; rota noktaları için toplu tahmin alınamadı."
+                      return [{"_error": reason} for _ in points]
+
+                  # Only a non-temporary response/schema mismatch reaches fallback.
+                  # Keep it sequential and bounded to avoid overloading the API.
+                  def get_one(xy):
+                    try:
+                      one_params = {
+                        "latitude": round(float(xy[0]), 4),
+                        "longitude": round(float(xy[1]), 4),
+                        "hourly": weather_vars, "forecast_days": 16,
+                        "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+                        "precipitation_unit": "mm"
+                      }
+                      one_resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=12)
+                      one_resp.raise_for_status()
+                      return parse_date_weather(one_resp.json(), target_date)
                     except Exception as exc:
-                      batch_error = f"Toplu sorgu başarısız: {exc}"
-                      if _is_temporary_service_problem(exc):
-                        # Do not amplify a temporary outage/rate limit with up to
-                        # 15 parallel fallback calls. Report unavailable data clearly.
-                        if '429' in str(exc).lower() or 'rate limit' in str(exc).lower():
-                          reason = "Yoğun istek nedeniyle hava servisi geçici sınır uyguladı (HTTP 429)."
-                        else:
-                          reason = "Hava servisine geçici olarak ulaşılamadı; rota noktaları için toplu tahmin alınamadı."
-                        return [{"_error": reason} for _ in points]
+                      return {"_error": f"{exc} (toplu sorgu: {batch_error})"}
 
-                    # Only a non-temporary response/schema mismatch reaches fallback.
-                    # Keep it sequential and bounded to avoid overloading the API.
-                    def get_one(xy):
-                      try:
-                        one_params = {
-                          "latitude": round(float(xy[0]), 4),
-                          "longitude": round(float(xy[1]), 4),
-                          "hourly": weather_vars, "forecast_days": 16,
-                          "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
-                          "precipitation_unit": "mm"
-                        }
-                        one_resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=one_params, timeout=12)
-                        one_resp.raise_for_status()
-                        return parse_date_weather(one_resp.json(), target_date)
-                      except Exception as exc:
-                        return {"_error": f"{exc} (toplu sorgu: {batch_error})"}
+                  fallback_results = []
+                  for xy in points[:5]:
+                    fallback_results.append(get_one(xy))
+                  fallback_results.extend(
+                    [{"_error": "Toplu yanıt biçimi uyuşmadı; ek sorgu güvenli istek sınırı nedeniyle yapılmadı."}
+                     for _ in points[len(fallback_results):]]
+                  )
+                  return fallback_results
 
-                    fallback_results = []
-                    for xy in points[:5]:
-                      fallback_results.append(get_one(xy))
-                    fallback_results.extend(
-                      [{"_error": "Toplu yanıt biçimi uyuşmadı; ek sorgu güvenli istek sınırı nedeniyle yapılmadı."}
-                       for _ in points[len(fallback_results):]]
-                    )
-                    return fallback_results
+                route_weather = get_date_weather_batch(sample_pts)
 
-                  route_weather = get_date_weather_batch(sample_pts)
+                risk_markers=[]; report_rows=[]; route_status="unknown"
+                valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
+                if valid_weather_count:
+                  route_status = "green" if valid_weather_count == len(sample_pts) else "partial"
+                for i, (xy, wx) in enumerate(zip(sample_pts, route_weather)):
+                  point_name = f"Rota kesimi {i+1}/{len(sample_pts)}"
+                  if not wx or wx.get("_error") or not any(wx.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")):
+                    err = (wx or {}).get("_error", "Tahmin verisi yok")
+                    point_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                    report_rows.append({"Rota noktası":point_name,"Riskli konumun açık adresi":point_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err})
+                    continue
+                  temp=wx.get("temperature_2m"); temp_max=wx.get("temperature_max")
+                  snow=wx.get("snowfall"); precip=wx.get("precipitation")
+                  peak_precip=wx.get("precipitation_peak")
+                  wind=wx.get("wind_speed_10m"); gust=wx.get("wind_gusts_10m")
+                  risks=[]; severity="green"
+                  if temp is not None and temp<=0 and ((snow is not None and snow>0) or (precip is not None and precip>0)):
+                    risks.append("Don/buzlanma ihtimali"); severity="red"
+                  if snow is not None and snow>=1:
+                    risks.append(f"Kar yağışı (günlük {snow:.1f} cm)"); severity="red"
+                  if precip is not None and precip>=20:
+                    risks.append(f"Yoğun günlük yağış ({precip:.1f} mm)"); severity="red"
+                  elif precip is not None and precip>=10:
+                    risks.append(f"Kuvvetli günlük yağış ({precip:.1f} mm)"); severity="orange" if severity!="red" else severity
+                  if peak_precip is not None and peak_precip>=10:
+                    risks.append(f"Saatlik yoğun yağış ({peak_precip:.1f} mm/sa)"); severity="red" if peak_precip>=20 else ("orange" if severity!="red" else severity)
+                  if gust is not None and gust>=70:
+                    risks.append(f"Çok kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="red"
+                  elif gust is not None and gust>=50:
+                    risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity!="red" else severity
+                  risk_address = "Risk eşiği aşılmadı"
+                  if risks:
+                    if severity == "red": route_status = "red"
+                    elif severity == "orange" and route_status not in ("red",): route_status = "orange"
+                    risk_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                    risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":f"{risk_address} · " + "; ".join(risks)})
+                  report_rows.append({
+                    "Rota noktası":point_name,"Riskli konumun açık adresi":risk_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
+                    "En düşük sıcaklık":f"{temp:.1f} °C" if temp is not None else "Veri yok",
+                    "En yüksek sıcaklık":f"{temp_max:.1f} °C" if temp_max is not None else "Veri yok",
+                    "Yağış toplamı":f"{precip:.1f} mm" if precip is not None else "Veri yok",
+                    "Saatlik en yüksek yağış":f"{peak_precip:.1f} mm/sa" if peak_precip is not None else "Veri yok",
+                    "Kar toplamı":f"{snow:.1f} cm" if snow is not None else "Veri yok",
+                    "Rüzgâr hamlesi":f"{gust:.0f} km/sa" if gust is not None else "Veri yok",
+                    "Risk":"; ".join(risks) if risks else "Belirgin eşik aşımı saptanmadı",
+                    "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi"
+                  })
 
-                  risk_markers=[]; report_rows=[]; route_status="unknown"
-                  valid_weather_count = sum(1 for item in route_weather if item and not item.get("_error") and any(item.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")))
-                  if valid_weather_count:
-                    route_status = "green" if valid_weather_count == len(sample_pts) else "partial"
-                  for i, (xy, wx) in enumerate(zip(sample_pts, route_weather)):
-                    point_name = f"Rota kesimi {i+1}/{len(sample_pts)}"
-                    if not wx or wx.get("_error") or not any(wx.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")):
-                      err = (wx or {}).get("_error", "Tahmin verisi yok")
-                      report_rows.append({"Rota noktası":point_name,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err})
-                      continue
-                    temp=wx.get("temperature_2m"); temp_max=wx.get("temperature_max")
-                    snow=wx.get("snowfall"); precip=wx.get("precipitation")
-                    peak_precip=wx.get("precipitation_peak")
-                    wind=wx.get("wind_speed_10m"); gust=wx.get("wind_gusts_10m")
-                    risks=[]; severity="green"
-                    if temp is not None and temp<=0 and ((snow is not None and snow>0) or (precip is not None and precip>0)):
-                      risks.append("Don/buzlanma ihtimali"); severity="red"
-                    if snow is not None and snow>=1:
-                      risks.append(f"Kar yağışı (günlük {snow:.1f} cm)"); severity="red"
-                    if precip is not None and precip>=20:
-                      risks.append(f"Yoğun günlük yağış ({precip:.1f} mm)"); severity="red"
-                    elif precip is not None and precip>=10:
-                      risks.append(f"Kuvvetli günlük yağış ({precip:.1f} mm)"); severity="orange" if severity!="red" else severity
-                    if peak_precip is not None and peak_precip>=10:
-                      risks.append(f"Saatlik yoğun yağış ({peak_precip:.1f} mm/sa)"); severity="red" if peak_precip>=20 else ("orange" if severity!="red" else severity)
-                    if gust is not None and gust>=70:
-                      risks.append(f"Çok kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="red"
-                    elif gust is not None and gust>=50:
-                      risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity!="red" else severity
-                    risk_address = "Risk eşiği aşılmadı"
-                    if risks:
-                      if severity == "red": route_status = "red"
-                      elif severity == "orange" and route_status not in ("red",): route_status = "orange"
-                      risk_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
-                      risk_markers.append({"lat":xy[0],"lon":xy[1],"name":f"Risk: rota kesimi {i+1}","risk":True,"severity":severity,"desc":f"{risk_address} · " + "; ".join(risks)})
-                    report_rows.append({
-                      "Rota noktası":point_name,"Riskli konumun açık adresi":risk_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}",
-                      "En düşük sıcaklık":f"{temp:.1f} °C" if temp is not None else "Veri yok",
-                      "En yüksek sıcaklık":f"{temp_max:.1f} °C" if temp_max is not None else "Veri yok",
-                      "Yağış toplamı":f"{precip:.1f} mm" if precip is not None else "Veri yok",
-                      "Saatlik en yüksek yağış":f"{peak_precip:.1f} mm/sa" if peak_precip is not None else "Veri yok",
-                      "Kar toplamı":f"{snow:.1f} cm" if snow is not None else "Veri yok",
-                      "Rüzgâr hamlesi":f"{gust:.0f} km/sa" if gust is not None else "Veri yok",
-                      "Risk":"; ".join(risks) if risks else "Belirgin eşik aşımı saptanmadı",
-                      "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi"
-                    })
-
-                  sample_markers=[{"lat":xy[0],"lon":xy[1],"name":f"Rota hava noktası {i+1}","risk":False,"desc":("Tahmin verisi alınamadı" if not wx or wx.get("_error") else "Rota boyunca meteorolojik kontrol noktası")}
-                                  for i,(xy,wx) in enumerate(zip(sample_pts,route_weather))]
-                  markers=[{"lat":lat_b,"lon":lon_b,"name":"Başlangıç: "+loc_b.address,"risk":False,"desc":"Başlangıç konumu"},
-                           {"lat":lat_v,"lon":lon_v,"name":"Varış: "+loc_v.address,"risk":False,"desc":"Varış konumu"}] + sample_markers + risk_markers
-                  st.session_state.route_map_data={"bas_ad":loc_b.address,"bit_ad":loc_v.address,
-                    "lat_b":lat_b,"lon_b":lon_b,"lat_v":lat_v,"lon_v":lon_v,"markers":markers,
-                    "route_geometry":route_geometry,"route_source":route_source,"report_table":report_rows,
-                    "status":route_status,"weather_coverage":valid_weather_count,"weather_total":len(sample_pts),
-                    "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
-                    "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
-                  st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
+                sample_markers=[{"lat":xy[0],"lon":xy[1],"name":f"Rota hava noktası {i+1}","risk":False,"desc":("Tahmin verisi alınamadı" if not wx or wx.get("_error") else "Rota boyunca meteorolojik kontrol noktası")}
+                                for i,(xy,wx) in enumerate(zip(sample_pts,route_weather))]
+                markers=[{"lat":lat_b,"lon":lon_b,"name":"Başlangıç: "+loc_b.address,"risk":False,"desc":"Başlangıç konumu"},
+                         {"lat":lat_v,"lon":lon_v,"name":"Varış: "+loc_v.address,"risk":False,"desc":"Varış konumu"}] + sample_markers + risk_markers
+                st.session_state.route_map_data={"bas_ad":loc_b.address,"bit_ad":loc_v.address,
+                  "lat_b":lat_b,"lon_b":lon_b,"lat_v":lat_v,"lon_v":lon_v,"markers":markers,
+                  "route_geometry":route_geometry,"route_source":route_source,"report_table":report_rows,
+                  "status":route_status,"weather_coverage":valid_weather_count,"weather_total":len(sample_pts),
+                  "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
+                  "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
+                st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
           except Exception as e:
-            show_service_issue("Türkiye içi güzergâh analizi tamamlanamadı.", e)
+            show_service_issue("Güzergâhın bazı analiz verileri alınamadı. Konumlar çözümlendiyse harita ve açıklayıcı rapor yine gösterilecek.", e)
+            try:
+              if "loc_b" in locals() and "loc_v" in locals() and loc_b and loc_v:
+                _lb, _lob = float(loc_b.latitude), float(loc_b.longitude)
+                _lv, _lov = float(loc_v.latitude), float(loc_v.longitude)
+                st.session_state.route_map_data = {
+                  "bas_ad":str(loc_b.address),"bit_ad":str(loc_v.address),
+                  "lat_b":_lb,"lon_b":_lob,"lat_v":_lv,"lon_v":_lov,
+                  "markers":[
+                    {"lat":_lb,"lon":_lob,"name":"Başlangıç: "+str(loc_b.address),"risk":False,"desc":"Başlangıç konumu"},
+                    {"lat":_lv,"lon":_lov,"name":"Varış: "+str(loc_v.address),"risk":False,"desc":"Varış konumu"}],
+                  "route_geometry":[(_lb,_lob),(_lv,_lov)],
+                  "route_source":"Şematik bağlantı (analiz sırasında geçici hata; gerçek yol geometrisi değildir)",
+                  "report_table":[{
+                    "Rota noktası":"Güzergâh genel durumu",
+                    "Riskli konumun açık adresi":f"{loc_b.address} → {loc_v.address}",
+                    "Koordinat":f"{_lb:.4f}, {_lob:.4f} → {_lv:.4f}, {_lov:.4f}",
+                    "Hava durumu":"Analiz kısmen tamamlanamadı","Risk":"Bilinmiyor",
+                    "Açıklama":f"Harita korunarak gösteriliyor. Eksik analiz nedeni: {str(e)[:350]}"}],
+                  "status":"unknown","weather_coverage":0,"weather_total":0,
+                  "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
+                  "mode_reason":"Kısmi analiz","distance_m":None,"duration_s":None}
+            except Exception:
+              st.session_state.route_map_data = None
 
     if st.session_state.get("route_map_data"):
       r_info=st.session_state.route_map_data
@@ -1628,7 +1650,13 @@ if seyahat_acik:
         st.info("⚪ Güzergâh hava verisi kısmi: bazı örnek noktalarda tahmin alınamadı; tüm rota için risksiz sonucu çıkarılamaz.")
       if coverage < total_points and r_info.get("status") in ("red", "orange"):
         st.warning("⚠️ Risk sinyali tespit edildi ancak rota tahmin kapsaması kısmi. Kapsanmayan kesimler için risksiz sonucu çıkarılamaz.")
-      st.dataframe(pd.DataFrame(r_info["report_table"]), use_container_width=True, hide_index=True)
+      _route_report = r_info.get("report_table") or [{
+        "Rota noktası":"Rapor oluşturulamadı",
+        "Riskli konumun açık adresi":f"{r_info.get('bas_ad','')} → {r_info.get('bit_ad','')}",
+        "Risk":"Bilinmiyor",
+        "Açıklama":"Rota geometrisi mevcut; ayrıntılı meteorolojik tablo oluşturulamadı."
+      }]
+      st.dataframe(pd.DataFrame(_route_report), use_container_width=True, hide_index=True)
 
       st.markdown("### 🗺️ Güzergâh haritası")
       all_pts=r_info.get("route_geometry") or [(r_info["lat_b"],r_info["lon_b"]),(r_info["lat_v"],r_info["lon_v"])]
