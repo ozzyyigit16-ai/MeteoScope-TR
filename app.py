@@ -1171,30 +1171,49 @@ def _route_geocode_photon(query):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_route_location(query):
-    """Cache route geocoding; fall back to Photon if Nominatim is rate-limited."""
+    """Resolve route endpoints with Photon first and Nominatim as a fallback.
+
+    Nominatim is a strictly rate-limited public service. Calling it first made
+    each route search wait on two serialized requests before the user could see
+    any result. Photon is attempted first; Nominatim is used only when Photon
+    cannot resolve the place.
+    """
+    photon_error = None
     try:
-        location = _nominatim_call(route_geocode_limiter, query, country_codes="tr", timeout=10)
+        result = _route_geocode_photon(query)
+        if result:
+            return result
+    except Exception as exc:
+        photon_error = exc
+
+    try:
+        location = _nominatim_call(
+            route_geocode_limiter, query, country_codes="tr", timeout=8
+        )
         if location is not None:
-            return {
-                "latitude": float(location.latitude),
-                "longitude": float(location.longitude),
-                "address": str(location.address),
-            }
+            address = str(location.address)
+            # Do not accept a result outside Türkiye just because the provider
+            # returned a geographically plausible name.
+            if "turkiye" in _tr_norm(address) or "turkey" in _tr_norm(address):
+                return {
+                    "latitude": float(location.latitude),
+                    "longitude": float(location.longitude),
+                    "address": address,
+                }
     except Exception as nominatim_error:
-        try:
-            fallback = _route_geocode_photon(query)
-            if fallback:
-                return fallback
-        except Exception as photon_error:
+        if photon_error is not None:
             raise TemporaryServiceError(
                 "adres bulma servisleri",
-                f"Nominatim yanıt vermedi ({str(nominatim_error)[:120]}); yedek servis de yanıt vermedi ({str(photon_error)[:120]})."
-            ) from photon_error
-        if _is_temporary_service_problem(nominatim_error):
-            raise TemporaryServiceError("Nominatim/Photon", str(nominatim_error)) from nominatim_error
+                f"Photon yanıt vermedi ({str(photon_error)[:120]}); Nominatim yanıt vermedi ({str(nominatim_error)[:120]})."
+            ) from nominatim_error
         raise
-    # Nominatim sonuç bulamadıysa da ikinci sağlayıcıyı dene.
-    return _route_geocode_photon(query)
+
+    if photon_error is not None:
+        raise TemporaryServiceError(
+            "Photon/Nominatim adres servisleri",
+            f"Photon hatası: {str(photon_error)[:160]}"
+        ) from photon_error
+    return None
 
 
 route_reverse_limiter = RateLimiter(
@@ -1407,8 +1426,7 @@ if seyahat_acik:
     rota_sorgula = st.button("Türkiye Rotasını ve Ulaşım Uygunluğunu Analiz Et 🇹🇷", type="primary")
 
     if rota_sorgula:
-      # Yeni sorgu başlarken önceki rotayı ekranda tutma; bu sorgunun sonucu
-      # ne olursa olsun aşağıda açık bir durum/rapor üretilecek.
+      # Yalnızca yeni ve açık bir sorguda eski raporu temizle.
       st.session_state.route_map_data = None
       if not baslangic_yer.strip() or not bitis_yer.strip():
         st.warning("Lütfen başlangıç ve varış konumlarını gir.")
@@ -1424,7 +1442,20 @@ if seyahat_acik:
             loc_b = SimpleNamespace(**loc_b_data) if loc_b_data else None
             loc_v = SimpleNamespace(**loc_v_data) if loc_v_data else None
             if not loc_b or not loc_v:
-              st.error("Başlangıç veya varış Türkiye içinde bulunamadı. İl/ilçe adıyla tekrar deneyin.")
+              missing = []
+              if not loc_b:
+                missing.append(f"Başlangıç konumu çözümlenemedi: {baslangic_yer.strip()}")
+              if not loc_v:
+                missing.append(f"Varış konumu çözümlenemedi: {bitis_yer.strip()}")
+              st.error("Başlangıç veya varış konumu adres servislerinde bulunamadı. İlçe/mahalle adıyla daha açık yazmayı deneyin.")
+              st.info("Adres çözümleme tamamlanamadığı için gerçek rota geometrisi ve yol üstü risk hesabı üretilemedi. Yanlış konum üzerinden tahmin göstermek yerine işlem durduruldu.")
+              st.dataframe(pd.DataFrame([{
+                "Kontrol": "Adres çözümleme",
+                "Başlangıç": baslangic_yer.strip(),
+                "Varış": bitis_yer.strip(),
+                "Sonuç": "Başarısız",
+                "Açıklama": " · ".join(missing)
+              }]), use_container_width=True, hide_index=True)
             else:
               # Prevent accidentally geocoding an ambiguous non-Turkey result.
               if "turkiye" not in _tr_norm(loc_b.address) and "turkey" not in _tr_norm(loc_b.address):
