@@ -1250,13 +1250,6 @@ if st.session_state.pop("_pending_main_search", None) is not None:
   st.session_state.search_input_val = st.session_state.get("_pending_main_search_value", "")
   st.session_state.pop("_pending_main_search_value", None)
 
-if st.session_state.pop("_pending_route_start", None) is not None:
-  st.session_state["bas_yer"] = st.session_state.get("_pending_route_start_value", "")
-  st.session_state.pop("_pending_route_start_value", None)
-if st.session_state.pop("_pending_route_end", None) is not None:
-  st.session_state["bit_yer"] = st.session_state.get("_pending_route_end_value", "")
-  st.session_state.pop("_pending_route_end_value", None)
-
 
 # --- TÜRKİYE İÇİ AKILLI SEYAHAT / GÜZERGÂH ANALİZİ ---
 # Ulaşım bağlantı bilgileri kontrollü bir başlangıç ağıdır. Sefer saatleri/koltuk
@@ -1394,8 +1387,7 @@ if seyahat_acik:
     st.markdown("### 🇹🇷 Türkiye İçi Akıllı Seyahat Planlama")
     st.caption("Türkiye içi şehir/hat ağı kontrolü yapılır. Bu sürüm sefer saati, koltuk veya bilet uygunluğunu canlı doğrulamaz; haritadaki tren/uçak/deniz çizgileri şematiktir.")
 
-    route_map_target = st.radio("Güzergâh haritasına tıklayınca hangi konum güncellensin?",
-        ["Başlangıç", "Varış"], horizontal=True, key="route_map_target")
+    st.caption("Bu bölümün haritası ana hava durumu haritasından bağımsız, ayrı bir harita penceresinde çalışır.")
     col_g1, col_g2 = st.columns(2)
     with col_g1:
       baslangic_yer = st.text_input("Başlangıç (Türkiye)", placeholder="Örn: İstanbul, Kadıköy", key="bas_yer")
@@ -1785,21 +1777,12 @@ if seyahat_acik:
         popup=f"<b>{item['name']}</b><br>{item.get('desc','')}"
         folium.Marker([item["lat"],item["lon"]],popup=folium.Popup(popup,max_width=350),tooltip=item["name"],
           icon=folium.Icon(color=color,icon=icon_name,prefix="glyphicon")).add_to(route_m)
-      route_map_data=st_folium(route_m,width="100%",height=460,key="route_map_turkey_smart_v1",returned_objects=["last_clicked","zoom"])
-      route_clicked=route_map_data.get("last_clicked") if route_map_data else None
-      if route_clicked:
-        rlat=round(float(route_clicked.get("lat")),6); rlon=round(float(route_clicked.get("lng")),6)
-        fingerprint=(rlat,rlon)
-        if fingerprint!=st.session_state.get("_route_map_last_click"):
-          st.session_state["_route_map_last_click"]=fingerprint
-          try:
-            place=reverse_route_risk_address(rlat, rlon)
-          except Exception: place=f"{rlat:.5f}, {rlon:.5f}"
-          if route_map_target=="Başlangıç":
-            st.session_state["_pending_route_start_value"]=place; st.session_state["_pending_route_start"]=True
-          else:
-            st.session_state["_pending_route_end_value"]=place; st.session_state["_pending_route_end"]=True
-          st.rerun()
+      # Güzergâh haritasını streamlit-folium bileşeni olarak değil,
+      # bağımsız HTML iframe olarak çiz. Böylece ana hava haritasının
+      # Streamlit-Folium component state'i / event döngüsüyle paylaşılmaz.
+      # Her iki harita ayrı Folium nesnesi ve ayrı tarayıcı iframe'idir.
+      route_html = route_m.get_root().render()
+      components.html(route_html, height=500, scrolling=False)
 
 
 # --- OPEN-METEO VERİ MOTORU ---
