@@ -11,6 +11,7 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 import time
+import threading
 import os
 import sqlite3
 import json
@@ -1086,7 +1087,7 @@ route_geocode_limiter = RateLimiter(
 
 
 def _route_request_get(url, *args, **kwargs):
-    """Route-only HTTP policy: bounded wait, no retry storm on HTTP 429."""
+    """Route-only HTTP policy: one bounded retry for transient network/5xx; never retry 429."""
     service = str(url).split('/')[2] if '://' in str(url) else 'rota servisi'
     last_exc = None
     for attempt in range(2):
@@ -1098,6 +1099,8 @@ def _route_request_get(url, *args, **kwargs):
                 time.sleep(0.7)
                 continue
             return response
+        except TemporaryServiceError:
+            raise
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exc = exc
             if attempt == 0:
@@ -1109,18 +1112,89 @@ def _route_request_get(url, *args, **kwargs):
     return response
 
 
+# Nominatim'ın 1 istek/s kuralını geocode ve reverse-geocode arasında ortak uygula.
+# İki ayrı RateLimiter kullanmak tek başına yeterli değildir; eşzamanlı oturumlar
+# farklı limiter'lardan aynı kamu servisine peş peşe istek gönderebilir.
+_NOMINATIM_LOCK = threading.Lock()
+_NOMINATIM_LAST_CALL = 0.0
+
+def _nominatim_call(func, *args, **kwargs):
+    global _NOMINATIM_LAST_CALL
+    with _NOMINATIM_LOCK:
+        wait_for = 1.15 - (time.monotonic() - _NOMINATIM_LAST_CALL)
+        if wait_for > 0:
+            time.sleep(wait_for)
+        _NOMINATIM_LAST_CALL = time.monotonic()
+        return func(*args, **kwargs)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _route_weather_batch_cached(latitudes, longitudes, weather_vars, forecast_days=16):
+    """Cache successful multi-coordinate route forecasts for 30 minutes."""
+    params = {
+        "latitude": latitudes, "longitude": longitudes,
+        "hourly": weather_vars, "forecast_days": forecast_days,
+        "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
+        "precipitation_unit": "mm"
+    }
+    response = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _route_geocode_photon(query):
+    """Secondary geocoder used when public Nominatim is throttled/unavailable."""
+    response = requests.get(
+        "https://photon.komoot.io/api/",
+        params={"q": query, "limit": 3, "lang": "tr", "lat": 39.0, "lon": 35.0},
+        headers={"User-Agent": "MeteoScope-TR/1.0 (route geocoding fallback)"},
+        timeout=10,
+    )
+    if response.status_code == 429:
+        raise TemporaryServiceError("photon.komoot.io", "HTTP 429 - yedek adres servisi yoğun", 429)
+    response.raise_for_status()
+    features = (response.json() or {}).get("features", [])
+    for feature in features:
+        props = feature.get("properties") or {}
+        country = _tr_norm(str(props.get("country") or ""))
+        if country not in ("turkiye", "turkey"):
+            continue
+        coords = (feature.get("geometry") or {}).get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        parts = [props.get(k) for k in ("name", "district", "city", "county", "state", "country")]
+        address = ", ".join(dict.fromkeys(str(x).strip() for x in parts if x and str(x).strip()))
+        return {"latitude": float(coords[1]), "longitude": float(coords[0]), "address": address or query}
+    return None
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_route_location(query):
-    """Cache route geocoding for one day and respect Nominatim's rate limit."""
-    location = route_geocode_limiter(query, country_codes="tr", timeout=10)
-    if location is None:
-        return None
-    # Cache only primitive values; reconstruct a lightweight attribute object at call site.
-    return {
-        "latitude": float(location.latitude),
-        "longitude": float(location.longitude),
-        "address": str(location.address),
-    }
+    """Cache route geocoding; fall back to Photon if Nominatim is rate-limited."""
+    try:
+        location = _nominatim_call(route_geocode_limiter, query, country_codes="tr", timeout=10)
+        if location is not None:
+            return {
+                "latitude": float(location.latitude),
+                "longitude": float(location.longitude),
+                "address": str(location.address),
+            }
+    except Exception as nominatim_error:
+        try:
+            fallback = _route_geocode_photon(query)
+            if fallback:
+                return fallback
+        except Exception as photon_error:
+            raise TemporaryServiceError(
+                "adres bulma servisleri",
+                f"Nominatim yanıt vermedi ({str(nominatim_error)[:120]}); yedek servis de yanıt vermedi ({str(photon_error)[:120]})."
+            ) from photon_error
+        if _is_temporary_service_problem(nominatim_error):
+            raise TemporaryServiceError("Nominatim/Photon", str(nominatim_error)) from nominatim_error
+        raise
+    # Nominatim sonuç bulamadıysa da ikinci sağlayıcıyı dene.
+    return _route_geocode_photon(query)
 
 
 route_reverse_limiter = RateLimiter(
@@ -1136,7 +1210,8 @@ route_reverse_limiter = RateLimiter(
 def reverse_route_risk_address(lat, lon):
     """Resolve a risk coordinate to a readable Turkish address; cache for 24h."""
     try:
-        place = route_reverse_limiter(
+        place = _nominatim_call(
+            route_reverse_limiter,
             (float(lat), float(lon)), exactly_one=True,
             language="tr", addressdetails=True, timeout=8
         )
@@ -1482,17 +1557,9 @@ if seyahat_acik:
                   target_date = planlanan_tarih.isoformat()
                   latitudes = ",".join(str(round(float(xy[0]), 4)) for xy in points)
                   longitudes = ",".join(str(round(float(xy[1]), 4)) for xy in points)
-                  params = {
-                    "latitude": latitudes, "longitude": longitudes,
-                    "hourly": weather_vars, "forecast_days": 16,
-                    "timezone": "Europe/Istanbul", "wind_speed_unit": "kmh",
-                    "precipitation_unit": "mm"
-                  }
                   batch_error = None
                   try:
-                    resp = _route_request_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=15)
-                    resp.raise_for_status()
-                    payload = resp.json()
+                    payload = _route_weather_batch_cached(latitudes, longitudes, weather_vars, 16)
                     if isinstance(payload, list) and len(payload) == len(points):
                       return [parse_date_weather(item, target_date) for item in payload]
                     if len(points) == 1 and isinstance(payload, dict):
@@ -1548,7 +1615,7 @@ if seyahat_acik:
                   point_name = f"Rota kesimi {i+1}/{len(sample_pts)}"
                   if not wx or wx.get("_error") or not any(wx.get(k) is not None for k in ("temperature_2m","precipitation","wind_gusts_10m","snowfall")):
                     err = (wx or {}).get("_error", "Tahmin verisi yok")
-                    point_address = reverse_route_risk_address(round(float(xy[0]), 5), round(float(xy[1]), 5))
+                    point_address = f"Açık adres çözümlenmedi (koordinat: {xy[0]:.5f}, {xy[1]:.5f})"
                     report_rows.append({"Rota noktası":point_name,"Riskli konumun açık adresi":point_address,"Koordinat":f"{xy[0]:.4f}, {xy[1]:.4f}","Hava durumu":"Veri alınamadı","Risk":"Bilinmiyor","Açıklama":err})
                     continue
                   temp=wx.get("temperature_2m"); temp_max=wx.get("temperature_max")
@@ -1633,7 +1700,7 @@ if seyahat_acik:
         st.metric("Karayolu mesafesi", f"{r_info['distance_m']/1000:.1f} km")
         if r_info.get("duration_s"):
           st.caption(f"OSRM tahmini sürüş süresi: {r_info['duration_s']/3600:.1f} saat (trafik ve mola dahil değildir).")
-      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Riskli koordinatlar için harita adres servisi üzerinden en yakın açık adres çözülür; bu adres yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
+      st.caption("Hava riskleri seçilen günün saatlik tahminlerinden hesaplanır (günlük toplamlar, saatlik yağış zirvesi, en düşük sıcaklık ve en yüksek rüzgâr hamlesi). Rota boyunca yaklaşık 100 km aralıklarla örnekleme yapılır. Aynı rota için başarılı toplu hava tahmini 30 dakika önbellekten kullanılır; adres aramasında Nominatim yanıt vermezse yedek Photon servisi denenir. Riskli koordinatlar için en yakın açık adres çözülür; bu adres yolun tam şerit/kapı numarası garantisi değildir. Tahmin ufku 16 güne kadardır; özellikle 5–7 günden sonraki tahminlerde belirsizlik artar. Kısa yerel olaylar ve yol/AFAD/KGM resmî uyarıları bu analizle garanti edilmez.")
       coverage = r_info.get("weather_coverage", 0); total_points = r_info.get("weather_total", 0)
       st.caption(f"Hava tahmini kapsaması: {coverage}/{total_points} rota noktası")
       if r_info.get("status") == "unknown":
@@ -1688,8 +1755,7 @@ if seyahat_acik:
         if fingerprint!=st.session_state.get("_route_map_last_click"):
           st.session_state["_route_map_last_click"]=fingerprint
           try:
-            reverse=geolocator.reverse((rlat,rlon),timeout=3)
-            place=reverse.address if reverse and reverse.address else f"{rlat:.5f}, {rlon:.5f}"
+            place=reverse_route_risk_address(rlat, rlon)
           except Exception: place=f"{rlat:.5f}, {rlon:.5f}"
           if route_map_target=="Başlangıç":
             st.session_state["_pending_route_start_value"]=place; st.session_state["_pending_route_start"]=True
