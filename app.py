@@ -1127,7 +1127,8 @@ route_reverse_limiter = RateLimiter(
     geolocator.reverse,
     min_delay_seconds=1.1,
     max_retries=0,
-    error_wait_seconds=1.0,
+    # Geopy requires error_wait_seconds >= min_delay_seconds.
+    error_wait_seconds=1.2,
     swallow_exceptions=True,
 )
 
