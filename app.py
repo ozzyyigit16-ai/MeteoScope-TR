@@ -515,10 +515,18 @@ def fetch_turkey_model_comparison():
           dates = daily.get("time") or []
           if not dates:
             continue
-          out[name] = {"date": dates[0], "model": model_id}
-          for field in fields:
-            vals = daily.get(field) or []
-            out[name][field] = vals[0] if vals and vals[0] is not None else None
+          # Her modelin üç günlük değerlerini tarih anahtarıyla sakla.
+          # Böylece örneğin üçüncü gün oluşan bir uyarı, ilk günün model tahminiyle
+          # yanlışlıkla karşılaştırılmaz.
+          daily_by_date = {}
+          for day_index, day_text in enumerate(dates):
+            day_values = {}
+            for field in fields:
+              vals = daily.get(field) or []
+              day_values[field] = vals[day_index] if day_index < len(vals) and vals[day_index] is not None else None
+            daily_by_date[str(day_text)] = day_values
+          out[name] = {"date": str(dates[0]), "model": model_id, "daily_by_date": daily_by_date}
+          out[name].update(daily_by_date.get(str(dates[0]), {}))
         return out
       except Exception as exc:
         last_error = exc
@@ -837,35 +845,69 @@ def fetch_turkey_wide_ews():
     row["model_comparison"] = model_by_city.get(row.get("il"), {})
   rows = national.get("rows", [])
   alerts = turkey_national_alerts(national)
-  # Uyarı türüne göre üç modelin de aynı risk yönünü destekleyip desteklemediğini not et.
+  # Uyarıyı, olayın gerçekleştiği GÜNÜN model tahminleriyle karşılaştır.
+  # Veri yokluğu ile modellerin risk eşiğini desteklememesi ayrı durumlar olarak gösterilir.
   for alert in alerts:
     city_model = model_by_city.get(alert.get("il"), {})
     city_data = city_model.get("models", {}) if isinstance(city_model, dict) else {}
     typ = str(alert.get("tip", "")).lower()
-    support = []
-    for model_label, values in city_data.items():
-      if not values:
-        continue
-      if "don" in typ or "sıcaklık" in typ or "buz" in typ:
-        field, threshold = "temperature_2m_min", 0
-      elif "kar" in typ or "snow" in typ:
-        field, threshold = "snowfall_sum", 0.1
-      elif "rüzgâr" in typ or "rüzgar" in typ:
-        field, threshold = "wind_gusts_10m_max", 50
-      elif "yağış" in typ or "rain" in typ:
-        field, threshold = "precipitation_sum", 20
-      else:
+    if "don" in typ or "sıcaklık" in typ or "buz" in typ:
+      field, threshold = "temperature_2m_min", 0
+    elif "kar" in typ or "snow" in typ:
+      field, threshold = "snowfall_sum", 0.1
+    elif "rüzgâr" in typ or "rüzgar" in typ:
+      field, threshold = "wind_gusts_10m_max", 50
+    elif "yağış" in typ or "rain" in typ:
+      # Günlük model toplamı, saatlik/3-6 saatlik şiddet eşiğini doğrudan doğrulayamaz.
+      if any(marker in typ for marker in ("saatlik", "3 saat", "6 saat")):
         field, threshold = None, None
-      value = values.get(field) if field else None
-      if value is not None:
+      else:
+        field, threshold = "precipitation_sum", 20
+    else:
+      field, threshold = None, None
+
+    try:
+      parsed_event_date = pd.to_datetime(alert.get("zaman"), errors="coerce")
+      event_date = None if pd.isna(parsed_event_date) else parsed_event_date.strftime("%Y-%m-%d")
+    except Exception:
+      event_date = None
+    support, comparable = [], []
+    if field and event_date:
+      for model_label, values in city_data.items():
+        if not isinstance(values, dict) or not values:
+          continue
+        day_values = (values.get("daily_by_date") or {}).get(event_date)
+        # Eski/eksik API yanıtında yalnızca ilk gün varsa sadece aynı tarihte kullan.
+        if day_values is None and str(values.get("date", "")) == event_date:
+          day_values = values
+        value = day_values.get(field) if isinstance(day_values, dict) else None
+        if value is None:
+          continue
+        comparable.append(model_label)
         agrees = (value >= threshold) if field != "temperature_2m_min" else (value <= threshold)
         if agrees:
           support.append(model_label)
+
     alert["model_destegi"] = len(support)
     alert["destekleyen_modeller"] = support
-    alert["model_uyumu"] = ("2+ model risk sinyalini destekliyor" if len(support)>=2 else
-                              "Tek model/ sınırlı destek" if len(support)==1 else
-                              "Model desteği doğrulanamadı")
+    alert["karsilastirilabilir_model_sayisi"] = len(comparable)
+    alert["karsilastirilan_tarih"] = event_date
+    if field is None:
+      if ("yağış" in typ or "rain" in typ) and any(marker in typ for marker in ("saatlik", "3 saat", "6 saat")):
+        status = "Kısa süreli yağış şiddeti günlük model verisiyle doğrudan doğrulanamaz"
+      else:
+        status = "Bu olay türü için karşılaştırılabilir model alanı yok"
+    elif not comparable:
+      status = "Olay gününe ait model karşılaştırma verisi alınamadı"
+    elif len(support) >= 2:
+      status = "2+ model risk sinyalini destekliyor"
+    elif len(support) == 1:
+      status = "Tek model risk sinyalini destekliyor"
+    elif len(comparable) >= 2:
+      status = "Model verisi mevcut; risk eşiği desteklenmiyor"
+    else:
+      status = "Yalnızca tek model verisi var; risk eşiği desteklenmiyor"
+    alert["model_uyumu"] = status
   successful = [r["il"] for r in rows]
   failed = [name for name in TURKEY_PROVINCES if name not in successful]
   regional = {}
@@ -1917,7 +1959,9 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         snow_series = pd.to_numeric(day_df["snowfall"], errors="coerce").dropna() if "snowfall" in day_df.columns else pd.Series(dtype=float)
         d_precip = float(precip_series.sum()) if not precip_series.empty else None
         max_hourly_p = float(precip_series.max()) if not precip_series.empty else None
-        d_snow = float(snow_series.sum()) if not snow_series.empty else None
+        # Open-Meteo snowfall alanı cm cinsindedir; ekranda kar birikim derinliği mm'ye çevrilir.
+        d_snow_cm = float(snow_series.sum()) if not snow_series.empty else None
+        d_snow_mm = d_snow_cm * 10.0 if d_snow_cm is not None else None
         d_wind = day_df["wind_gusts_10m"].max() if "wind_gusts_10m" in day_df.columns else (day_df["wind_speed_10m"].max() if "wind_speed_10m" in day_df.columns else None)
 
         if max_hourly_p is None:
@@ -1931,6 +1975,17 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         else:
           yagis_durum_str = "🟢 Düşük yağış" if d_precip is not None else "Veri yok"
 
+        if d_snow_mm is None:
+          kar_durum_str = "Veri yok"
+        elif d_snow_mm <= 0:
+          kar_durum_str = "🟢 Kar yağışı beklenmiyor"
+        elif d_snow_mm <= 5:
+          kar_durum_str = "🟡 Düşük kar birikimi"
+        elif d_snow_mm <= 20:
+          kar_durum_str = "🟠 Hafif kar birikimi"
+        else:
+          kar_durum_str = "🔴 Çok kar birikimi"
+
         gun_ismi = pd.to_datetime(d).strftime('%A')
         gun_tr = {"Monday": "Pazartesi", "Tuesday": "Salı", "Wednesday": "Çarşamba", "Thursday": "Perşembe", "Friday": "Cuma", "Saturday": "Cumartesi", "Sunday": "Pazar"}.get(gun_ismi, gun_ismi)
 
@@ -1940,6 +1995,8 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
             st.metric(label="Min / Max Sıcaklık (Best Match)", value=(f"{d_min_t:.1f}°C / {d_max_t:.1f}°C" if d_min_t is not None and d_max_t is not None else "Veri yok"))
             st.metric(label="Yağış Durumu", value=yagis_durum_str)
             st.metric(label="Beklenen Toplam Yağış", value=(f"{d_precip:.1f} mm" if d_precip is not None else "Veri yok"))
+            st.metric(label="Kar Yağışı Durumu", value=kar_durum_str)
+            st.metric(label="Beklenen Kar Birikimi", value=(f"{d_snow_mm:.1f} mm" if d_snow_mm is not None else "Veri yok"))
             st.metric(label="Maksimum Rüzgâr Hamlesi", value=(f"{d_wind:.1f} km/sa" if d_wind is not None and pd.notna(d_wind) else "Veri yok"))
 
     if current_data:
@@ -1964,7 +2021,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
 
     with tab9:
       st.subheader("🚨 Türkiye Geneli Erken Uyarı Masası")
-      st.caption("81 il merkezi tahmini üzerinden eşik tabanlı otomatik tarama. Bu sistem MGM/AFAD resmî uyarısı değildir; yerel koşullar farklılık gösterebilir.")
+      st.caption("81 il merkezi tahmini üzerinden eşik tabanlı otomatik tarama. Model desteği, olayın gerçekleştiği günün ECMWF IFS / GFS / ICON günlük tahminleriyle karşılaştırılır. ‘Risk eşiği desteklenmiyor’ model verisinin bulunduğunu ancak ilgili eşiğin aşılmadığını; ‘veri alınamadı’ ise karşılaştırma verisinin eksik olduğunu belirtir. Bu sistem MGM/AFAD resmî uyarısı değildir; yerel koşullar farklılık gösterebilir.")
       st.caption(f"Veri zamanı: {ews_result.get('national', {}).get('updated_at', 'bilinmiyor')} · Kapsam: {len(ews_result.get('successful_centers', []))}/81 il")
       risk_alerts = ews_result.get("alerts", [])
       if risk_alerts:
@@ -2186,6 +2243,18 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       rep_prob_series = pd.to_numeric(df_3days["precipitation_probability"], errors="coerce").dropna() if "precipitation_probability" in df_3days.columns else pd.Series(dtype=float)
       rep_precip = float(rep_precip_series.sum()) if not rep_precip_series.empty else None
       rep_snow = float(rep_snow_series.sum()) if not rep_snow_series.empty else None
+      # Open-Meteo snowfall cm verir; kullanıcıya kar birikim derinliğini mm olarak göster.
+      rep_snow_mm = rep_snow * 10.0 if rep_snow is not None else None
+      if rep_snow_mm is None:
+        rep_snow_status = "Veri yok"
+      elif rep_snow_mm <= 0:
+        rep_snow_status = "Kar yağışı beklenmiyor"
+      elif rep_snow_mm <= 5:
+        rep_snow_status = "Düşük"
+      elif rep_snow_mm <= 20:
+        rep_snow_status = "Hafif"
+      else:
+        rep_snow_status = "Çok"
       rep_wind_series = pd.to_numeric(df_3days["wind_gusts_10m"], errors="coerce").dropna() if "wind_gusts_10m" in df_3days.columns else pd.Series(dtype=float)
       if rep_wind_series.empty and "wind_speed_10m" in df_3days.columns:
         rep_wind_series = pd.to_numeric(df_3days["wind_speed_10m"], errors="coerce").dropna()
@@ -2213,6 +2282,7 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.markdown(f"**Tahmin zamanı:** {local_time_text}")
         st.markdown(f"**Anlık sıcaklık / hissedilen:** {current_data.get('temperature_2m'):.1f} °C / {current_data.get('apparent_temperature'):.1f} °C" if current_data.get("temperature_2m") is not None and current_data.get("apparent_temperature") is not None else "**Anlık sıcaklık / hissedilen:** Eksik veri")
         st.markdown(f"**Önümüzdeki 3 gün toplam yağış:** {rep_precip:.1f} mm" if rep_precip is not None else "**Önümüzdeki 3 gün toplam yağış:** Veri yok")
+        st.markdown(f"**Önümüzdeki 3 gün kar birikimi:** {rep_snow_mm:.1f} mm · **Durum:** {rep_snow_status}" if rep_snow_mm is not None else "**Önümüzdeki 3 gün kar birikimi:** Veri yok")
         st.markdown(f"**Önümüzdeki 3 gün sıcaklık aralığı:** {rep_min:.1f}–{rep_max:.1f} °C" if rep_min is not None and rep_max is not None else "**Önümüzdeki 3 gün sıcaklık aralığı:** Veri yok")
         st.markdown(f"**Maksimum rüzgâr hamlesi:** {rep_wind:.1f} km/sa" if rep_wind is not None else "**Maksimum rüzgâr hamlesi:** Veri yok")
         st.caption("Tahmin kaynağı: Open-Meteo Best Match. Çoklu model durumu: " + (", ".join(active_models) if active_models else "bağımsız model verisi bulunamadı; Best Match kullanılıyor."))
@@ -2236,13 +2306,14 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
       rep_wind_text = f"{rep_wind:.1f} km/sa" if rep_wind is not None else "Veri yok"
       rep_temp_text = f"{rep_min:.1f}–{rep_max:.1f} °C" if rep_min is not None and rep_max is not None else "Veri yok"
       rep_precip_text = f"{rep_precip:.1f} mm" if rep_precip is not None else "Veri yok"
+      rep_snow_text = f"{rep_snow_mm:.1f} mm ({rep_snow_status})" if rep_snow_mm is not None else "Veri yok"
       official_text = official_warning.get("text", "Resmî uyarı alınamadı.")
       report_text = (
           "METEOROLOJİK BÜLTEN VE OTOMATİK HAZIRLIK ÖNERİLERİ\n"
           f"Konum: {selected_location}\nKoordinatlar: {st.session_state.lat:.4f}, {st.session_state.lon:.4f}\n"
           f"Tahmin zamanı: {local_time_text}\nAnlık sıcaklık: {current_temp_text}\n"
           f"Best Match 3 günlük sıcaklık aralığı: {rep_temp_text}\n"
-          f"Toplam yağış (3 gün): {rep_precip_text}\nMaksimum rüzgâr hamlesi: {rep_wind_text}\n"
+          f"Toplam yağış (3 gün): {rep_precip_text}\nKar birikimi (3 gün): {rep_snow_text}\nMaksimum rüzgâr hamlesi: {rep_wind_text}\n"
           f"Kullanılabilen modeller: {', '.join(active_models) if active_models else 'Yalnızca Best Match'}\n\n"
           "MGM RESMÎ UYARI BİLGİSİ\n" + official_text + "\n"
           "MGM MeteoUYARI: https://www.mgm.gov.tr/meteouyari/turkiye.aspx\n"
