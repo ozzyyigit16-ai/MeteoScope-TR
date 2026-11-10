@@ -2048,6 +2048,23 @@ if st.session_state.lat is not None and st.session_state.lon is not None:
         st.markdown("#### Türkiye haritası · il bazında sıcaklık ve hava verileri")
         map_metric=st.selectbox("Haritada gösterilecek sıcaklık",["temperature_2m_max","temperature_2m_min"],
           format_func=lambda x:"Gündüz en yüksek sıcaklık" if x=="temperature_2m_max" else "Gece/sabah en düşük sıcaklık",key="v20_turkey_map_metric")
+        # Harita tarihi, tahmin satırından alınır; sistem tarihine sabitlenmez.
+        # Böylece tahmin günü her yeni günlük veriyle otomatik ilerler.
+        map_forecast_date = national_rows[0].get("tarih") if national_rows else None
+        try:
+          parsed_map_date = pd.to_datetime(map_forecast_date)
+          tr_weekdays = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+          map_forecast_date_label = f"{parsed_map_date.strftime('%d.%m.%Y')} {tr_weekdays[parsed_map_date.weekday()]}"
+        except Exception:
+          map_forecast_date_label = str(map_forecast_date or "Tarih bilgisi alınamadı")
+        map_fetch_time = national.get("updated_at", "bilinmiyor")
+        map_metric_label = ("Günlük en yüksek sıcaklık" if map_metric == "temperature_2m_max"
+                            else "Günlük en düşük sıcaklık")
+        st.info(
+          f"🗓️ **Tahmin tarihi:** {map_forecast_date_label}  ·  "
+          f"🕒 **Verinin kaynaktan alınma zamanı:** {map_fetch_time} (Türkiye saati)  ·  "
+          f"🌡️ **Harita gösterimi:** {map_metric_label}. Günlük ortalama sıcaklık gösterilmez."
+        )
         turkey_map=build_turkey_temperature_map(national_rows,map_metric)
         if turkey_map is not None:
           st_folium(turkey_map,width=None,height=650,key="v20_turkey_temperature_map")
