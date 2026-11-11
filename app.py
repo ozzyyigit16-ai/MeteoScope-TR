@@ -1297,6 +1297,8 @@ if "_main_map_last_click" not in st.session_state:
 
 if "route_map_data" not in st.session_state:
   st.session_state.route_map_data = None
+if "route_request_pending" not in st.session_state:
+  st.session_state.route_request_pending = False
 # Eski sürümün oturum state verisi yeni rapor şemasıyla uyumlu değilse temizle.
 if st.session_state.get("route_map_data") and "route_geometry" not in st.session_state.route_map_data:
   st.session_state.route_map_data = None
@@ -1421,30 +1423,20 @@ def _tr_mode_availability(mode, loc_b, loc_v, dist_km):
     if not a or not b:
         return None, "Konumlar Türkiye içinde çözümlendi ancak şehir/hat eşleşmesi yapılamadı. Ulaşım uygunluğu kesin doğrulanamadı."
     if mode == "Uçak":
-        if a[0] in TR_AIRPORT_CITIES and b[0] in TR_AIRPORT_CITIES and dist_km >= 150:
-            return True, "Her iki uç noktada da havalimanı/şehir eşleşmesi var. Bu, seçilen tarihte direkt uçuş veya bilet bulunduğunu garanti etmez."
-        return False, "Uçak için iki uçta da uygun havalimanı eşleşmesi ve makul şehirler arası mesafe doğrulanamadı."
+        return False, "Bu sürümde seçilen tarih için doğrulanmış uçuş bağlantısı ve gerçek uçuş rotası verisi bulunamadı."
     if mode == "Tren":
-        rail_path = _tr_rail_path(a[0], b[0])
-        if rail_path:
-            if len(rail_path) == 2:
-                return True, "Bilinen demiryolu koridorunda bağlantı eşleşmesi var. Bu, seçilen tarihte sefer veya bilet bulunduğunu garanti etmez."
-            transfer_names = " → ".join(rail_path[1:-1])
-            return True, f"Bilinen demiryolu koridoru üzerinden bağlantı yolu bulundu (ara şehirler: {transfer_names}). Bu, aktarmalı seferin seçilen tarihte çalıştığını garanti etmez."
-        return False, "Türkiye içindeki bilinen demiryolu koridoru ağında bu iki şehir arasında bağlantı bulunamadı."
+        return False, "Bu sürümde doğrulanmış demiryolu hat geometrisi ve sefer bağlantısı bulunamadı."
     if mode == "Deniz yolu":
-        if frozenset((a[0], b[0])) in TR_FERRY_LINKS or a[0] == b[0]:
-            return True, "Bilinen yolcu feribotu/deniz bağlantısı eşleşmesi var; seferin seçilen tarihte çalıştığı ayrıca doğrulanmalıdır."
-        return False, "Bu iki şehir arasında bilinen doğrudan yolcu deniz bağlantısı eşleşmedi."
+        return False, "Bu sürümde seçilen tarih için doğrulanmış deniz/feribot bağlantısı ve rota geometrisi bulunamadı."
     return True, "Karayolu bağlantısı OSRM yol ağı üzerinden ayrıca sorgulanacak."
 
 seyahat_acik = st.toggle("🚗 Türkiye İçi Akıllı Güzergâh & Yol Üstü Risk Analizi", value=False,
-    help="Türkiye içi karayolu rotası, ulaşım türü uygunluğu ve seçilen tarihe yönelik hava risklerini analiz eder.")
+    help="Seçilen ulaşım türüne ait doğrulanmış güzergâh bulunursa harita ve yol üstü hava risklerini analiz eder.")
 
 if seyahat_acik:
   with st.container(border=True):
     st.markdown("### 🇹🇷 Türkiye İçi Akıllı Seyahat Planlama")
-    st.caption("Türkiye içi şehir/hat ağı kontrolü yapılır. Bu sürüm sefer saati, koltuk veya bilet uygunluğunu canlı doğrulamaz; haritadaki tren/uçak/deniz çizgileri şematiktir.")
+    st.caption("Yalnızca gerçek güzergâh geometrisi alınabilen ulaşım türleri haritada gösterilir. Doğrulanmış hat bulunamazsa şematik çizgi üretilmez.")
 
     st.caption("Bu bölümün haritası ana hava durumu haritasından bağımsız, ayrı bir harita penceresinde çalışır.")
     col_g1, col_g2 = st.columns(2)
@@ -1463,9 +1455,15 @@ if seyahat_acik:
           min_value=today_route, max_value=route_max_date, key="route_travel_date",
           help="Güzergâh hava riski analizi bugün dahil 7 günlük tahmin aralığını kullanır.")
 
-    rota_sorgula = st.button("Rotayı ve Hava Risklerini Analiz Et 🇹🇷", type="primary")
+    rota_sorgula = st.button("Rotayı ve Hava Risklerini Analiz Et 🇹🇷", type="primary", key="route_analyze_submit_v39")
 
+    # Streamlit button values exist for only one script run. Keep the request in
+    # session_state so a rerun during a slow external request cannot silently
+    # discard the route analysis and leave the UI looking untouched.
     if rota_sorgula:
+      st.session_state.route_request_pending = True
+
+    if st.session_state.get("route_request_pending", False):
       # Yalnızca yeni ve açık bir sorguda eski raporu temizle.
       st.session_state.route_map_data = None
       if not baslangic_yer.strip() or not bitis_yer.strip():
@@ -1500,49 +1498,14 @@ if seyahat_acik:
               lat_b, lon_b = float(loc_b.latitude), float(loc_b.longitude)
               lat_v, lon_v = float(loc_v.latitude), float(loc_v.longitude)
 
-              # İlk güvenilir çıktı: dış rota/hava servisleri çağrılmadan önce
-              # başlangıç-varış haritası ve beklemede raporu oturuma yazılır.
-              # Böylece sonraki herhangi bir servis hatası harita bölümünü boş bırakamaz.
-              st.session_state.route_map_data = {
-                "bas_ad": str(loc_b.address), "bit_ad": str(loc_v.address),
-                "lat_b": lat_b, "lon_b": lon_b, "lat_v": lat_v, "lon_v": lon_v,
-                "markers": [
-                  {"lat": lat_b, "lon": lon_b, "name": "Başlangıç: " + str(loc_b.address), "risk": False, "desc": "Başlangıç konumu"},
-                  {"lat": lat_v, "lon": lon_v, "name": "Varış: " + str(loc_v.address), "risk": False, "desc": "Varış konumu"}
-                ],
-                "route_geometry": [(lat_b, lon_b), (lat_v, lon_v)],
-                "route_source": "Ön harita · analiz sürüyor (şematik çizgi, gerçek yol geometrisi değildir)",
-                "report_table": [{
-                  "Rota noktası": "Güzergâh ön kontrolü",
-                  "Riskli konumun açık adresi": f"{loc_b.address} → {loc_v.address}",
-                  "Koordinat": f"{lat_b:.4f}, {lon_b:.4f} → {lat_v:.4f}, {lon_v:.4f}",
-                  "Hava durumu": "Analiz sürüyor",
-                  "Risk": "Henüz hesaplanmadı",
-                  "Açıklama": "Konumlar bulundu. Yol ve meteoroloji servisleri kontrol ediliyor."
-                }],
-                "status": "unknown", "weather_coverage": 0, "weather_total": 0,
-                "date": planlanan_tarih.strftime("%d.%m.%Y"), "mode": ulasim_turu,
-                "mode_reason": "Analiz sürüyor", "distance_m": None, "duration_s": None
-              }
-
               straight_km = geodesic((lat_b, lon_b), (lat_v, lon_v)).km
               mode_ok, mode_reason = _tr_mode_availability(ulasim_turu, loc_b, loc_v, straight_km)
               route_geometry=[]; route_distance_m=None; route_duration_s=None; route_source=""
 
-              if mode_ok is False:
-                # Ulaşım türü eşleşmesi doğrulanamasa da konumlar çözümlendiyse
-                # harita ve hava analizi kaybolmasın. Şematik çizgi açıkça etiketlenir.
-                st.warning(f"Seçilen ulaşım türü doğrulanamadı: {mode_reason} Harita ve hava analizi şematik bağlantı üzerinden sürdürülecek.")
-                force_schematic_route = True
-              elif mode_ok is None:
-                st.warning(f"{mode_reason} Harita ve hava analizi şematik bağlantı üzerinden sürdürülecek.")
-                force_schematic_route = True
-              else:
-                force_schematic_route = False
-              if force_schematic_route:
-                route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
-                route_source="Şematik bağlantı (ulaşım türü/hat eşleşmesi doğrulanamadı; gerçek yol veya sefer geometrisi değildir)"
-              elif ulasim_turu in ("Özel araç", "Otobüs"):
+              if mode_ok is not True:
+                st.session_state.route_map_data = None
+                raise ValueError("Böyle bir güzergâh bulunamadı. " + str(mode_reason))
+              if ulasim_turu in ("Özel araç", "Otobüs"):
                 try:
                   osrm_url = (f"https://router.project-osrm.org/route/v1/driving/"
                     f"{lon_b:.6f},{lat_b:.6f};{lon_v:.6f},{lat_v:.6f}")
@@ -1561,40 +1524,44 @@ if seyahat_acik:
                   else:
                     raise RuntimeError("OSRM bu iki nokta arasında karayolu rotası döndürmedi.")
                 except Exception as route_err:
-                  # Yol ağı servisi geçici olarak yanıt vermese de analiz akışını
-                  # tamamen düşürme. Şematik bağlantıyı açıkça etiketle; gerçek
-                  # yol geometrisi veya yol üstü adresiymiş gibi sunma.
-                  show_service_issue("Gerçek yol geometrisi şu anda alınamadı. Güzergâhın şematik bağlantısı ve mevcut hava verileri gösterilecek.", route_err)
-                  route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
-                  route_source="Şematik bağlantı (OSRM yol ağı geçici olarak alınamadı; gerçek yol geometrisi değildir)"
-                  route_distance_m=None
-                  route_duration_s=None
-              else:
-                # Non-road modes: show only a clearly labelled schematic connection.
-                route_geometry=[(lat_b,lon_b),(lat_v,lon_v)]
-                route_source="Şematik bağlantı (gerçek sefer/hat geometrisi değildir)"
-                if ulasim_turu == "Tren":
-                  a_tokens, b_tokens = _tr_place_tokens(loc_b), _tr_place_tokens(loc_v)
-                  rail_path = _tr_rail_path(a_tokens[0], b_tokens[0]) if a_tokens and b_tokens else None
-                  if rail_path:
-                    route_source += " · demiryolu şehir koridoru: " + " → ".join(rail_path)
+                  raise RuntimeError(f"Gerçek karayolu güzergâhı alınamadı: {route_err}") from route_err
 
+              if len(route_geometry) < 2:
+                raise RuntimeError("Gerçek güzergâh geometrisi alınamadı; hava riski analizi başlatılmadı.")
               if route_geometry:
-                # Route sampling: distribute weather checks along the corridor, not only at endpoints.
-                # For road routes, use distance-based density; for schematic connections, interpolate.
+                # Route sampling: distribute weather checks along the actual corridor, not only at endpoints.
+                # Use distance-based density along the returned road polyline.
                 route_km = (route_distance_m / 1000.0) if route_distance_m else straight_km
                 # Aşırı sayıda koordinat üretmek yerine 5-9 temsilî nokta kullan.
                 # Tek çoklu-konum API isteğiyle tüm koridor taranır.
                 n_samples = max(5, min(9, int(route_km / 150.0) + 2))
-                if len(route_geometry) > 2:
-                  sample_indices = sorted(set(round(i * (len(route_geometry)-1) / (n_samples-1)) for i in range(n_samples)))
-                  sample_pts = [route_geometry[i] for i in sample_indices]
-                else:
-                  # Schematic route only: sample between endpoints and label that limitation.
-                  sample_pts = [(lat_b + (lat_v-lat_b)*i/(n_samples-1),
-                                 lon_b + (lon_v-lon_b)*i/(n_samples-1)) for i in range(n_samples)]
+                # Sample along the actual returned polyline by cumulative road
+                # distance. Never interpolate directly between trip endpoints.
+                segment_lengths = [
+                  geodesic(route_geometry[i], route_geometry[i+1]).km
+                  for i in range(len(route_geometry)-1)
+                ]
+                total_line_km = sum(segment_lengths)
+                if total_line_km <= 0:
+                  raise RuntimeError("Güzergâh çizgisinin uzunluğu hesaplanamadı.")
+                sample_pts = []
+                for sample_i in range(n_samples):
+                  target_km = total_line_km * sample_i / (n_samples-1)
+                  traversed_km = 0.0
+                  chosen = route_geometry[-1]
+                  for seg_i, seg_km in enumerate(segment_lengths):
+                    if traversed_km + seg_km >= target_km or seg_i == len(segment_lengths)-1:
+                      fraction = 0.0 if seg_km <= 0 else max(0.0, min(1.0, (target_km-traversed_km)/seg_km))
+                      p0, p1 = route_geometry[seg_i], route_geometry[seg_i+1]
+                      chosen = (
+                        p0[0] + (p1[0]-p0[0])*fraction,
+                        p0[1] + (p1[1]-p0[1])*fraction
+                      )
+                      break
+                    traversed_km += seg_km
+                  sample_pts.append((float(chosen[0]), float(chosen[1])))
 
-                weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,weather_code"
+                weather_vars = "temperature_2m,precipitation,snowfall,wind_speed_10m,wind_gusts_10m,visibility,weather_code"
 
                 def parse_date_weather(payload, target_date):
                   """Normalize one Open-Meteo location response into daily route metrics."""
@@ -1619,6 +1586,7 @@ if seyahat_acik:
                   snow = vals("snowfall")
                   wind = vals("wind_speed_10m")
                   gust = vals("wind_gusts_10m")
+                  visibility = vals("visibility")
                   codes = vals("weather_code")
                   gust_arr = hourly.get("wind_gusts_10m") or []
                   precip_arr = hourly.get("precipitation") or []
@@ -1634,6 +1602,7 @@ if seyahat_acik:
                     "snowfall": sum(snow) if snow else None,
                     "wind_speed_10m": max(wind) if wind else None,
                     "wind_gusts_10m": max(gust) if gust else None,
+                    "visibility_min": min(visibility) if visibility else None,
                     "weather_code": codes[0] if codes else None,
                     "peak_gust_time": times[peak_gust_i] if peak_gust_i < len(times) else None,
                     "peak_rain_time": times[peak_rain_i] if peak_rain_i < len(times) else None,
@@ -1726,6 +1695,7 @@ if seyahat_acik:
                   snow=wx.get("snowfall"); precip=wx.get("precipitation")
                   peak_precip=wx.get("precipitation_peak")
                   wind=wx.get("wind_speed_10m"); gust=wx.get("wind_gusts_10m")
+                  visibility_min=wx.get("visibility_min")
                   risks=[]; severity="green"
                   if temp is not None and temp<=0 and ((snow is not None and snow>0) or (precip is not None and precip>0)):
                     risks.append("Don/buzlanma ihtimali"); severity="red"
@@ -1740,11 +1710,16 @@ if seyahat_acik:
                   if gust is not None and gust>=70:
                     risks.append(f"Çok kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="red"
                   elif gust is not None and gust>=50:
-                    risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity!="red" else severity
+                    risks.append(f"Kuvvetli rüzgâr hamlesi ({gust:.0f} km/sa)"); severity="orange" if severity not in ("red",) else severity
+                  if visibility_min is not None and visibility_min < 1000:
+                    risks.append(f"Çok düşük görüş / sis ihtimali (en düşük görüş {visibility_min:.0f} m)")
+                    if severity == "green":
+                      severity = "blue"
                   risk_address = "Risk eşiği aşılmadı"
                   if risks:
                     if severity == "red": route_status = "red"
                     elif severity == "orange" and route_status not in ("red",): route_status = "orange"
+                    elif severity == "blue" and route_status == "green": route_status = "blue"
                     # Kamu adres servisine 15 kez yüklenme. En fazla üç riskli
                     # noktanın açık adresini çöz; kalan riskler koordinatla korunur.
                     if reverse_address_count < 3:
@@ -1761,6 +1736,7 @@ if seyahat_acik:
                     "Saatlik en yüksek yağış":f"{peak_precip:.1f} mm/sa" if peak_precip is not None else "Veri yok",
                     "Kar toplamı":f"{snow:.1f} cm" if snow is not None else "Veri yok",
                     "Rüzgâr hamlesi":f"{gust:.0f} km/sa" if gust is not None else "Veri yok",
+                    "En düşük görüş":f"{visibility_min:.0f} m" if visibility_min is not None else "Veri yok",
                     "Risk":"; ".join(risks) if risks else "Belirgin eşik aşımı saptanmadı",
                     "Kritik saat":wx.get("peak_gust_time") or wx.get("peak_rain_time") or "Gün içi",
                     "Veri kaynağı":(f"Son başarılı önbellek · {wx.get('_cache_age_minutes', '?')} dk önce" if wx.get("_stale_cache") else "Canlı Open-Meteo")
@@ -1781,34 +1757,44 @@ if seyahat_acik:
                   "mode_reason":mode_reason,"distance_m":route_distance_m,"duration_s":route_duration_s}
                 st.success(f"Ulaşım türü uygunluk kontrolü tamamlandı. {mode_reason}")
           except Exception as e:
-            show_service_issue("Güzergâhın bazı analiz verileri alınamadı. Konumlar çözümlendiyse harita ve açıklayıcı rapor yine gösterilecek.", e)
+            if "Böyle bir güzergâh bulunamadı" in str(e):
+              st.warning(str(e))
+            else:
+              show_service_issue("Güzergâh analizi tamamlanamadı.", e)
             if isinstance(e, TemporaryServiceError):
               st.caption(f"Güzergâh servis ayrıntısı: {e.service}" + (f" · HTTP {e.status_code}" if e.status_code else ""))
-            try:
-              if "loc_b" in locals() and "loc_v" in locals() and loc_b and loc_v:
-                _lb, _lob = float(loc_b.latitude), float(loc_b.longitude)
-                _lv, _lov = float(loc_v.latitude), float(loc_v.longitude)
-                st.session_state.route_map_data = {
-                  "bas_ad":str(loc_b.address),"bit_ad":str(loc_v.address),
-                  "lat_b":_lb,"lon_b":_lob,"lat_v":_lv,"lon_v":_lov,
-                  "markers":[
-                    {"lat":_lb,"lon":_lob,"name":"Başlangıç: "+str(loc_b.address),"risk":False,"desc":"Başlangıç konumu"},
-                    {"lat":_lv,"lon":_lov,"name":"Varış: "+str(loc_v.address),"risk":False,"desc":"Varış konumu"}],
-                  "route_geometry":[(_lb,_lob),(_lv,_lov)],
-                  "route_source":"Şematik bağlantı (analiz sırasında geçici hata; gerçek yol geometrisi değildir)",
-                  "report_table":[{
-                    "Rota noktası":"Güzergâh genel durumu",
-                    "Riskli konumun açık adresi":f"{loc_b.address} → {loc_v.address}",
-                    "Koordinat":f"{_lb:.4f}, {_lob:.4f} → {_lv:.4f}, {_lov:.4f}",
-                    "Hava durumu":"Analiz kısmen tamamlanamadı","Risk":"Bilinmiyor",
-                    "Açıklama":f"Harita korunarak gösteriliyor. Eksik analiz nedeni: {str(e)[:350]}"}],
-                  "status":"unknown","weather_coverage":0,"weather_total":0,
-                  "date":planlanan_tarih.strftime("%d.%m.%Y"),"mode":ulasim_turu,
-                  "mode_reason":"Kısmi analiz","distance_m":None,"duration_s":None}
-            except Exception as fallback_error:
-              # Preserve the earliest endpoint-only map rather than erasing it.
-              if not st.session_state.get("route_map_data"):
-                st.error(f"Güzergâh haritası hazırlanamadı: {fallback_error}")
+            # If a genuine route was already obtained, preserve that real line
+            # while marking all weather risk as unknown. Never fabricate a
+            # straight line between endpoints.
+            if ("loc_b" in locals() and "loc_v" in locals() and loc_b and loc_v
+                and "route_geometry" in locals() and len(route_geometry) >= 2):
+              st.session_state.route_map_data = {
+                "bas_ad": str(loc_b.address), "bit_ad": str(loc_v.address),
+                "lat_b": float(loc_b.latitude), "lon_b": float(loc_b.longitude),
+                "lat_v": float(loc_v.latitude), "lon_v": float(loc_v.longitude),
+                "markers": [
+                  {"lat": float(loc_b.latitude), "lon": float(loc_b.longitude),
+                   "name": "Başlangıç: " + str(loc_b.address), "risk": False, "desc": "Başlangıç konumu"},
+                  {"lat": float(loc_v.latitude), "lon": float(loc_v.longitude),
+                   "name": "Varış: " + str(loc_v.address), "risk": False, "desc": "Varış konumu"}
+                ],
+                "route_geometry": route_geometry, "route_source": route_source,
+                "report_table": [{
+                  "Rota noktası": "Güzergâh genel durumu",
+                  "Riskli konumun açık adresi": f"{loc_b.address} → {loc_v.address}",
+                  "Koordinat": f"{float(loc_b.latitude):.4f}, {float(loc_b.longitude):.4f} → {float(loc_v.latitude):.4f}, {float(loc_v.longitude):.4f}",
+                  "Hava durumu": "Analiz tamamlanamadı", "Risk": "Bilinmiyor",
+                  "Açıklama": str(e)[:350], "Veri kaynağı": "Alınamadı"
+                }],
+                "status": "unknown", "weather_coverage": 0, "weather_total": 0,
+                "date": planlanan_tarih.strftime("%d.%m.%Y"), "mode": ulasim_turu,
+                "mode_reason": "Gerçek rota bulundu; meteorolojik analiz tamamlanamadı",
+                "distance_m": route_distance_m, "duration_s": route_duration_s
+              }
+            else:
+              st.session_state.route_map_data = None
+      # The request has now either completed or produced a visible validation/error result.
+      st.session_state.route_request_pending = False
 
     if st.session_state.get("route_map_data"):
       r_info = st.session_state.route_map_data
@@ -1820,10 +1806,10 @@ if seyahat_acik:
       metric_cols = st.columns(3)
       with metric_cols[0]:
         distance = r_info.get("distance_m")
-        st.metric("Karayolu mesafesi", f"{distance/1000:.0f} km" if distance else "—")
+        st.metric("Güzergâh mesafesi", f"{distance/1000:.0f} km" if distance else "—")
       with metric_cols[1]:
         duration = r_info.get("duration_s")
-        st.metric("Tahmini sürüş", f"{duration/3600:.1f} saat" if duration else "—")
+        st.metric("Tahmini yolculuk", f"{duration/3600:.1f} saat" if duration else "—")
       with metric_cols[2]:
         st.metric("Hava verisi", f"{coverage}/{total_points}" if total_points else "Alınamadı")
       stale_count = int(r_info.get("stale_weather_count", 0) or 0)
@@ -1844,6 +1830,8 @@ if seyahat_acik:
         st.warning("🟠 Dikkat: güzergâhın en az bir bölümünde dikkat gerektiren hava koşulları bekleniyor.")
       elif status == "partial":
         st.warning("⚪ Analiz kısmi: bazı rota noktalarında tahmin alınamadı. Kapsanmayan bölümler risksiz kabul edilemez.")
+      elif status == "blue":
+        st.info("🔵 Görüş uyarısı: güzergâhın en az bir bölümünde sis veya düşük görüş koşulları bekleniyor.")
       elif status == "green":
         st.success("🟢 Analiz edilen rota noktalarında tanımlı yüksek/dikkat risk eşikleri aşılmadı. Bu, resmî yol güvenliği garantisi değildir.")
 
@@ -1854,13 +1842,16 @@ if seyahat_acik:
       risk_rows = [row for row in report_rows
                    if row.get("Risk") not in (None, "", "Belirgin eşik aşımı saptanmadı", "Bilinmiyor")]
       unknown_rows = [row for row in report_rows if row.get("Risk") == "Bilinmiyor"]
+      if report_rows:
+        st.markdown("### 📋 Güzergâh hava risk tablosu")
+        st.dataframe(pd.DataFrame(report_rows), use_container_width=True, hide_index=True)
       if risk_rows:
         st.markdown("**Dikkat gerektiren rota noktaları**")
         for row in risk_rows[:6]:
           address = row.get("Riskli konumun açık adresi") or row.get("Koordinat") or "Konum bilgisi yok"
           details = row.get("Risk", "Risk bilgisi yok")
           values = []
-          for key in ("Yağış toplamı", "Kar toplamı", "Rüzgâr hamlesi", "En düşük sıcaklık"):
+          for key in ("Yağış toplamı", "Kar toplamı", "Rüzgâr hamlesi", "En düşük sıcaklık", "En düşük görüş"):
             value = row.get(key)
             if value and value != "Veri yok":
               values.append(f"{key}: {value}")
@@ -1875,9 +1866,12 @@ if seyahat_acik:
       if unknown_rows:
         st.caption(f"{len(unknown_rows)} rota noktasında hava verisi alınamadı; bu noktalar haritada risk yokmuş gibi gösterilmez.")
 
-      st.caption("Hava analizi seçilen günün saatlik tahminlerinden yapılır. Tahmin ufku 16 güne kadardır ve ileri tarihlerde belirsizlik artar. Haritadaki açık adresler yaklaşık konum tarifidir; yolun şerit veya kapı numarası garantisi değildir.")
+      st.caption("Hava analizi seçilen günün saatlik tahminlerinden yapılır. Güzergâh tahmini bugün dâhil 7 günlük aralıkla sınırlıdır. Haritadaki açık adresler yaklaşık konum tarifidir; yolun şerit veya kapı numarası garantisi değildir.")
       st.markdown("### 🗺️ Güzergâh haritası")
-      all_pts = r_info.get("route_geometry") or [(r_info["lat_b"], r_info["lon_b"]), (r_info["lat_v"], r_info["lon_v"])]
+      all_pts = r_info.get("route_geometry") or []
+      if len(all_pts) < 2:
+        st.error("Gerçek güzergâh geometrisi bulunmadığı için harita çizilmedi.")
+        st.stop()
       center_lat = sum(p[0] for p in all_pts) / len(all_pts)
       center_lon = sum(p[1] for p in all_pts) / len(all_pts)
       route_m = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="OpenStreetMap")
@@ -1892,16 +1886,12 @@ if seyahat_acik:
         route_m.fit_bounds(display_pts)
       Fullscreen().add_to(route_m)
       LocateControl().add_to(route_m)
-      if r_info.get("mode") in ("Özel araç", "Otobüs") and len(display_pts) > 2 and "OSRM" in str(r_info.get("route_source", "")):
-        folium.PolyLine(display_pts, color="#2b7bff", weight=5, opacity=0.85,
-                        tooltip="OSRM gerçek yol ağı rotası").add_to(route_m)
-      else:
-        folium.PolyLine(display_pts, color="#888888", weight=3, opacity=0.8,
-                        dash_array="8,8", tooltip="Şematik bağlantı; gerçek hat değildir").add_to(route_m)
+      folium.PolyLine(display_pts, color="#2b7bff", weight=5, opacity=0.9,
+                      tooltip=str(r_info.get("route_source", "Doğrulanmış güzergâh"))).add_to(route_m)
       for item in r_info.get("markers", []):
         if item.get("risk"):
           severity = item.get("severity", "orange")
-          color = "red" if severity == "red" else ("orange" if severity == "orange" else "yellow")
+          color = "red" if severity == "red" else ("orange" if severity == "orange" else ("blue" if severity == "blue" else "yellow"))
           icon_name = "exclamation-sign"
         else:
           color = "blue" if "Başlangıç" in item.get("name", "") else "green"
